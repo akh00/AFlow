@@ -4,10 +4,7 @@
 >
 > This document specifies the AFlow workflow engine, the JSON representation of a
 > workflow, the human-authored **hjson** form, and the **TypeScript DSL** that
-> produces it. It is a from-concepts redesign of the "Vulcan / OAAS" engine
-> documented in `docs/Vulcan+flow+detailed.pdf` and `docs/OAAS Design-*.pdf`. Where
-> a detail is uncertain, the behaviour of the Groovy reference workflow
-> `examples/workflows/ordering/cancel_order_with_full_refund` is authoritative.
+> produces it. 
 
 ---
 
@@ -54,6 +51,27 @@
   artifactory** (§9).
 - **Three interchangeable representations** with a single semantics: canonical
   **JSON** (§13), hand-authored **hjson** (§14), and a typed **TS DSL** (§15).
+
+### Deliverable artifacts
+
+This specification is realised by four artifacts, each with a well-defined
+interface:
+
+1. **Workflow schema definition** — the JSON Schema (`aflow.schema.json`, §16) that
+   defines and validates the JSON representation of any workflow.
+2. **Workflow DSL definition** — the typed TypeScript DSL (§15) authors use to
+   write workflows, with autocomplete and compile-time checks derived from the
+   workflow's type `definitions` (§10).
+3. **DSL → plan compiler / converter** — a tool that compiles a DSL workflow into
+   the canonical **plan**: the schema-valid workflow JSON, and its 1:1 hjson form
+   (§14). Round-trippable: `DSL → hjson → JSON`.
+4. **Workflow evaluation engine** — the runtime that executes a workflow:
+   - **input:** a workflow definition (conforming to the schema of artifact 1) plus
+     an input request (conforming to the workflow's declared `input` type, §10);
+   - **output:** a response conforming to the workflow's declared `result` type, or
+     a declared error;
+   - **behaviour:** drives the input item deterministically through the task graph
+     to an end state per §12, with the guarantees of §8.
 
 ### Non-goals
 
@@ -107,7 +125,7 @@ one item structure (following the PDF "Draft"):
   "objects": { /* typed working state, grown by `enrich` and effect `output` */ },
 
   "tasks": {                      // recorded state, one entry per node this item visited
-    "Supply_Verify_Change": {
+    "verify_change": {
       "id": "1234567",
       "status": "success",        // success | failure | pending | error
       "started": "2020-12-03T10:15:30+01:00",
@@ -118,7 +136,7 @@ one item structure (following the PDF "Draft"):
     }
   },
 
-  "next_task": "Supply_Change",   // routing target; null ⇒ this item's branch is complete
+  "next_task": "make_change",   // routing target; null ⇒ this item's branch is complete
   "target_state": "success",      // author-defined disposition
   "logging_context": { "order_id": "123456" },
   "additional_properties": { /* free-form */ }
@@ -177,7 +195,7 @@ A node's common (kind-independent) fields:
 
 ```jsonc
 {
-  "name": "Supply_Verify_Change",
+  "name": "verify_change",
   "item": "order_line",        // which item type this node applies to (the `this` binding)
   "condition": { "$expr": "true" },        // gate predicate (default: always)
   "await":  { /* select + until */ },        // optional synchronization (§7)
@@ -212,19 +230,19 @@ effect `input`, and effect `output` transforms. They:
 - may **not** perform I/O, mutate global state, read the clock/RNG, or depend on
   arrival order. They are deterministic functions of the item tree.
 
-The expression language is JavaScript restricted to pure evaluation. The idioms
-mirror the Groovy reference: collection filtering/among items —
+The expression language is JavaScript restricted to pure evaluation : collection filtering/among items —
 `items.filter(i => i.type==='order_line')`, quorum —
 `set.every(i => i.next_task===null)`, lookups — `parent.objects.order`.
 
 ### Effects (declared tasks only)
 
-All I/O (HTTP, gRPC, sub-workflow, inline JS calling external APIs) happens **only**
+All I/O (HTTP, sub-workflow, inline JS calling external APIs) happens **only**
 inside a `call` body (§6, §9). The effect's **result is captured** into
 `this.tasks[name].result`. Downstream expressions read the recorded result, never
 the live call. This is what makes determinism-of-outcome (§8) and retry/replay
 (§11) sound.
 
+[//]: # (diagram: left:50)
 ```mermaid
 flowchart TD
     subgraph Pure["Pure — engine-evaluated, replayable"]
@@ -232,7 +250,7 @@ flowchart TD
       Sel[select/until/reduce] & In[effect input] & Out[effect output]
     end
     subgraph Effect["Effect — the ONLY I/O"]
-      Call["call: http | grpc | sub_workflow | js"]
+      Call["call: http | sub_workflow | js"]
     end
     Call -->|"result captured to tasks[name].result"| Pure
 ```
@@ -249,15 +267,15 @@ Exactly one body kind per node.
 | `route` | pure | Routing-only node (no body work; just sets `next_task`). |
 | `split` (`add_items`) | pure | Create child items from a selector; optionally route + run them (parallel). |
 | `aggregate` (`join`) | pure | General wait-then-reduce over a selected item set (§7). |
-| `call` | **effect** | Invoke `http` / `grpc` / `sub_workflow` / `js`; capture result. |
+| `call` | **effect** | Invoke `http` / `sub_workflow` / `js`; capture result. |
 | `return` | terminal | Emit workflow `result` or `error` and end the branch. |
 
 ### 6.1 `enrich`
 
 ```jsonc
-{ "name": "Enrich_Order_Line", "item": "order_line",
+{ "name": "enrich_order_line", "item": "order_line",
   "enrich": { "$do": "objects.order_item = parent.objects.order.order_items.find(oi => oi.id === data.order_item_id)" },
-  "route": "Supply_Build_Change_Target" }
+  "route": "build_change_target" }
 ```
 
 `$do` is a pure statement block that assigns into `this` (`objects`, `data`,
@@ -266,9 +284,9 @@ Exactly one body kind per node.
 ### 6.2 `route` (router)
 
 ```jsonc
-{ "name": "Supply_Verify_Change_Router", "item": "order_line",
-  "route": { "switch": { "$expr": "objects.change_order_process.transaction_mode" },
-             "cases": { "2-Phase": "Supply_Hold_Change", "One-Phase-One-Step": null } } }
+{ "name": "verify_change_router", "item": "order_line",
+  "route": { "switch": { "$expr": "objects.change_order_process.mode" },
+             "cases": { "one_mode": "do_change", "other_mode": null } } }
 ```
 
 ### 6.3 `split` / `add_items`
@@ -277,14 +295,14 @@ Creates children of `this`. `selector` returns an array; each element becomes a
 child item's `data`. `parallel` runs the produced items concurrently (§8).
 
 ```jsonc
-{ "name": "Add_Order_Lines", "item": "input",
+{ "name": "add_order_lines", "item": "input",
   "split": {
     "itemType": "order_line",
     "selector": { "$expr": "data.order_item_ids ? data.order_item_ids.map(id => ({order_item_id:id})) : objects.order.order_items.map(oi => ({order_item_id: oi.id}))" },
-    "route": "Enrich_Order_Line",
+    "route": "enrich_order_line",
     "parallel": true
   },
-  "route": "Cancel_Order_Item_Router" }
+  "route": "change_order_item_router" }
 ```
 
 ### 6.4 `aggregate` / `join`
@@ -298,13 +316,13 @@ See §9.
 ### 6.6 `return`
 
 ```jsonc
-{ "name": "Return_Result", "item": "input",
-  "return": { "result": { "$expr": "objects.cancel_response" } } }
+{ "name": "return_result", "item": "input",
+  "return": { "result": { "$expr": "objects.change_response" } } }
 ```
 
 ```jsonc
-{ "name": "Return_Error", "item": "input",
-  "return": { "error": { "$expr": "({ code:500, category:'TECHNICAL', message:'Cancel order transaction failed', data:{ causes: objects.error_causes } })" } } }
+{ "name": "return_error", "item": "input",
+  "return": { "error": { "$expr": "({ code:500, category:'TECHNICAL', message:'Something very bad happened', data:{ causes: objects.error_causes } })" } } }
 ```
 
 ---
@@ -317,14 +335,14 @@ condition, and a **`reduce`** that folds the set into `this`. All three are pure
 expressions evaluated with a chosen `this`.
 
 ```jsonc
-{ "name": "Supply_Commit_Rollback_Router", "item": "input",
+{ "name": "change_rollback_router", "item": "input",
   "aggregate": {
-    "select": { "$expr": "items.filter(i => i.objects?.change_order_process?.transaction_mode === '2-Phase')" },
+    "select": { "$expr": "items.filter(i => i.objects?.change_order_process?.transaction_mode === 'two_phase')" },
     "until":  { "$expr": "set.every(i => i.next_task === null)" },
     "reduce": { "$do": "objects.all_committed = set.every(i => i.target_state === 'success')" }
   },
   "target_state_setter": { "$expr": "items.find(i => i.target_state==='failure' && !i.optional) ? 'failure' : 'success'" },
-  "route": { "cases": { "success": "Construct_Updated_Order", "failure": "ODS_Unlock_SubWF" } } }
+  "route": { "cases": { "success": "construct_updated_order", "failure": "rollback_changes" } } }
 ```
 
 ### The three shapes are one mechanism
@@ -332,10 +350,9 @@ expressions evaluated with a chosen `this`.
 - **A — parent barrier (the everyday case).** `select` reads `parent`'s children.
   Because computing a node's input or checking a condition already reads *across*
   items, most joins are simply "wait until my children reach a routing point, then
-  read them." This is exactly the reference workflow's
-  `Cancel_Order_Item_Router` / `Supply_Commit_Rollback_Router`.
+  read them."
 - **B — await this item's own prior work.** `select` = `this` itself; `until`
-  reads `this.tasks` or this item's async branches. Sugar: `await: ["HoldAsync"]`
+  reads `this.tasks` or this item's async branches. Sugar: `await: ["ChangeAsync"]`
   (§8) is a B-gate on named branches.
 - **C — general.** `this` is any item; `select` an arbitrary item set.
 
@@ -347,8 +364,8 @@ flowchart TD
     L1 --> J{{"aggregate<br/>select = parent.items<br/>until = all done<br/>reduce = fold states"}}
     L2 --> J
     L3 --> J
-    J -->|success| K[Construct_Updated_Order]
-    J -->|failure| U[ODS_Unlock]
+    J -->|success| K[construct_updated_order]
+    J -->|failure| U[rollback_changes]
 ```
 
 ### Determinism constraints (normative)
@@ -376,12 +393,12 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant M as main branch (this=input)
-    participant H as async branch (HoldAsync)
+    participant H as async branch (ChangeAsync)
     M->>H: async: true (spawn)
     M->>M: continue flow
     Note over H: runs its trajectory on isolated view
-    M->>M: reach node with await:[HoldAsync]
-    M-->>H: block (gate: until HoldAsync done)
+    M->>M: reach node with await:[ChangeAsync]
+    M-->>H: block (gate: until ChangeAsync done)
     H-->>M: branch complete → merge via reduce
     M->>M: proceed
 ```
@@ -410,22 +427,22 @@ A `call` body is the only place I/O happens. It selects one **provider**.
 ### Common shape
 
 ```jsonc
-{ "name": "Persistence_Save_GRPC", "item": "input",
+{ "name": "save_change", "item": "input",
   "durable": true, "idempotent": true, "timeout": 4500,
   "retry": { "inline": { "max_count": 0 }, "offline": { "max_count": 10, "interval": "5m" } },
   "call": {
-    "provider": "grpc",
-    "input":  { "$expr": "objects.persist_request" },
+    "provider": "http",
+    "input":  { "$expr": "objects.save_request" },
     "request": {
-      "host": { "$expr": "parameters['persistence.grpc-host']" },
-      "service_name": "expediagroup.order.persistence.v1beta1.PersistenceServiceAPI",
-      "operation": "Persist",
-      "negotiation_type": "TLS"
+      "method":  "POST",
+      "url":     { "$expr": "`${parameters['persistence.base-url']}/orders/${data.order_id}`" },
+      "headers": { "$expr": "({ 'content-type': 'application/json' })" },
+      "body":    { "$expr": "objects.save_request" }
     },
-    "output": { "resultType": "PersistResponse", "errorType": "Error",
-                "enrich": { "$do": "/* map response → objects */" } }
+    "output": { "resultType": "SaveResponse", "errorType": "Error",
+                "enrich": { "$do": "objects.save_status = result.status" } }
   },
-  "route": "ODS_Unlock_SubWF" }
+  "route": "return_result" }
 ```
 
 ### Providers
@@ -433,14 +450,13 @@ A `call` body is the only place I/O happens. It selects one **provider**.
 | provider | description |
 |---|---|
 | `http` | Declarative HTTP request; retry on 5xx / IO per §11. |
-| `grpc` | Declarative gRPC call (host, service, operation, body). |
 | `sub_workflow` | Invoke another workflow by `name` with computed `input`; its `result`/`error` is captured; offline retries bubble to the root (§11). |
 | `js` | **Inline JavaScript** — arbitrary code, may call external APIs. `input` expression feeds it; return value captured as the task result. |
 
 ### Inline JS + libraries
 
 ```jsonc
-{ "name": "Score_Fraud", "item": "input", "timeout": 30000,
+{ "name": "score_fraud", "item": "input", "timeout": 30000,
   "call": {
     "provider": "js",
     "implementation": {                     // packaged with the workflow…
@@ -473,14 +489,14 @@ Types are first-class and **travel with the workflow**, exactly as in
 `generated.json`.
 
 - **`definitions{}`** — JSON-Schema definitions of every message type
-  (`CancelOrderWithFullRefundRequest`, `Order`, …), typically generated from proto.
-  `input` and `result` are `$ref`s into it:
+  (`ChangeOrderRequest`, `ChangeOrderResponse`, `Order`, …), typically generated
+  from your domain type definitions. `input` and `result` are `$ref`s into it:
 
   ```jsonc
   "definitions": {
-    "input":  { "$ref": "#/definitions/expediagroup.order.cancel.v1beta1.CancelOrderWithFullRefundRequest" },
-    "result": { "$ref": "#/definitions/expediagroup.order.cancel.v1beta1.CancelOrderWithFullRefundResponse" },
-    "expediagroup.order.common.v1beta1.Order": { "type": "object", "properties": { /* … */ } }
+    "input":  { "$ref": "#/definitions/com.example.ChangeOrderRequest" },
+    "result": { "$ref": "#/definitions/com.example.ChangeOrderResponse" },
+    "com.example.Order": { "type": "object", "properties": { /* … */ } }
   }
   ```
 
@@ -490,7 +506,7 @@ Types are first-class and **travel with the workflow**, exactly as in
   ```jsonc
   "items": {
     "input":      { "data": { "$ref": "#/definitions/input" }, "objects": { "$ref": "#/definitions/InputObjects" }, "parent": null },
-    "order_line": { "data": { "$ref": "#/definitions/OrderLineData" }, "objects": { "$ref": "#/definitions/OrderLineObjects" }, "parent": "input" }
+    "order_line": { "data": { "$ref": "#/definitions/OrderOrderData" }, "objects": { "$ref": "#/definitions/OrderObjects" }, "parent": "input" }
   }
   ```
 
@@ -561,16 +577,16 @@ Top-level shape (canonical machine form; equivalent of `generated.json`):
 
 ```jsonc
 {
-  "client_id": "ordering",
-  "name": "cancel_order_with_full_refund",
+  "client_id": "someclient",
+  "name": "change_order",
   "version": "<auto>",
 
   "definitions": { /* §10 — message types; input/result $refs */ },
   "items":       { /* §10 — item type declarations */ },
 
   "config": {
-    "proto_descriptor": { "name": "eg-business-domains-protos" },
-    "bundles": [ { "name": "fraud-utils", "version": "1.4.0" } ],
+    "json_descriptor": { "name": "business-domains-schema" },
+    "bundles": [ { "name": "fraud-utils", "version": "1.1.1" } ],
     "defaults": {
       "item": {
         "objects": { "errors": [], "tech_errors": [] },
@@ -607,13 +623,13 @@ the JSON of §13 — `$expr`/`$do`/`script` bodies become readable multiline JS.
 
 ```hjson
 {
-  client_id: ordering
-  name: cancel_order_with_full_refund
+  client_id: someclient
+  name: change_order
 
   tasks:
   [
     {
-      name: Add_Order_Lines
+      name: add_order_lines
       item: input
       // split the order into one child item per order line
       split:
@@ -625,23 +641,23 @@ the JSON of §13 — `$expr`/`$do`/`script` bodies become readable multiline JS.
             ? data.order_item_ids.map(id => ({ order_item_id: id }))
             : objects.order.order_items.map(oi => ({ order_item_id: oi.id }))
           '''
-        route: Enrich_Order_Line
+        route: enrich_order_line
         parallel: true
       }
-      route: Cancel_Order_Item_Router
+      route: change_order_item_router
     }
 
     {
-      name: Supply_Commit_Rollback_Router
+      name: change_rollback_router
       item: input
-      // wait for all 2-Phase order lines, then decide commit vs rollback
+      // wait for all 'two_phase' order lines, then decide commit vs rollback
       aggregate:
       {
-        select: "items.filter(i => i.objects?.change_order_process?.transaction_mode === '2-Phase')"
+        select: "items.filter(i => i.objects?.change_order_process?.transaction_mode === 'two_phase')"
         until:  "set.every(i => i.next_task === null)"
       }
       target_state_setter: "items.find(i => i.target_state==='failure' && !i.optional) ? 'failure' : 'success'"
-      route: { cases: { success: Construct_Updated_Order, failure: ODS_Unlock_SubWF } }
+      route: { cases: { success: construct_updated_order, failure: rollback_changes } }
     }
   ]
 }
@@ -662,54 +678,53 @@ builder methods.
 
 ```typescript
 import { workflow, InputItem, ChildItem } from "@aflow/dsl";
-import type { CancelReq, CancelResp, Order, OrderLineData, OrderLineObjects } from "./generated.types";
+import type { ChangeOrderRequest, ChangeOrderResponse, OrderLineData, OrderLineObjects } from "./generated.types";
 
-const wf = workflow<CancelReq, CancelResp>({
-  clientId: "ordering",
-  name: "cancel_order_with_full_refund",
+const wf = workflow<ChangeOrderRequest, ChangeOrderResponse>({
+  clientId: "someclient",
+  name: "change_order",
 });
 
 // Item types: TypedItem<Data, Objects, Parent>
-const Input     = wf.item("input", InputItem<CancelReq>());
+const Input     = wf.item("input", InputItem<ChangeOrderRequest>());
 const OrderLine = wf.item("order_line", ChildItem<OrderLineData, OrderLineObjects, typeof Input>());
 
-wf.task("Add_Order_Lines", Input, t => {
+wf.task("add_order_lines", Input, t => {
   t.split(OrderLine, {
     // `this` is fully typed → autocomplete on data/objects
     selector: (self) =>
       self.data.orderItemIds?.length
         ? self.data.orderItemIds.map(id => ({ orderItemId: id }))
         : self.objects.order.orderItems.map(oi => ({ orderItemId: oi.id })),
-    route: "Enrich_Order_Line",
+    route: "enrich_order_line",
     parallel: true,
   });
-  t.route("Cancel_Order_Item_Router");
+  t.route("change_order_item_router");
 });
 
-wf.task("Supply_Commit_Rollback_Router", Input, t => {
+wf.task("change_rollback_router", Input, t => {
   t.aggregate({
-    select: (self) => self.items.filter(i => i.objects?.changeOrderProcess?.transactionMode === "2-Phase"),
+    select: (self) => self.items.filter(i => i.objects?.changeOrderProcess?.transactionMode === "two_phase"),
     until:  (set)  => set.every(i => i.nextTask === null),
   });
   t.targetState((self) =>
     self.items.find(i => i.targetState === "failure" && !i.optional) ? "failure" : "success");
-  t.route({ success: "Construct_Updated_Order", failure: "ODS_Unlock_SubWF" });
+  t.route({ success: "construct_updated_order", failure: "rollback_changes" });
 });
 
-wf.task("Persistence_Save", Input, t => {
+wf.task("save_change", Input, t => {
   t.durable().idempotent()
    .retry({ inline: { maxCount: 0 }, offline: { maxCount: 10, interval: "5m" } });
-  t.call.grpc({
-    input:   (self) => self.objects.persistRequest,
-    host:    (self) => self.params["persistence.grpc-host"],
-    service: "expediagroup.order.persistence.v1beta1.PersistenceServiceAPI",
-    operation: "Persist",
-    output:  (self, result) => { self.objects.persistStatus = result.status; },
+  t.call.http({
+    method: "POST",
+    url:    (self) => `${self.params["persistence.base-url"]}/orders/${self.data.orderId}`,
+    body:   (self) => self.objects.saveRequest,
+    output: (self, result) => { self.objects.saveStatus = result.status; },
   });
-  t.route("ODS_Unlock_SubWF");
+  t.route("return_result");
 });
 
-wf.call.js("Score_Fraud", Input, {          // effect: inline JS + bundled/artifactory library
+wf.call.js("score_fraud", Input, {          // effect: inline JS + bundled/artifactory library
   bundle: { name: "fraud-utils", version: "1.4.0", entry: "com.example.FraudScorer" },
   input:  (self) => ({ order: self.objects.order }),
   script: async (input, lib) => await lib.score(input),
@@ -844,12 +859,12 @@ The full schema is delivered as `aflow.schema.json`. Skeleton:
       "type": "object",
       "required": ["provider"],
       "properties": {
-        "provider": { "enum": ["http", "grpc", "sub_workflow", "js"] },
+        "provider": { "enum": ["http", "sub_workflow", "js"] },
         "input":    { "$ref": "#/$defs/expr" },
         "output":   { "type": "object",
                       "properties": { "resultType": { "type": "string" }, "errorType": { "type": "string" },
                                       "enrich": { "$ref": "#/$defs/expr" } } },
-        "request":  { "type": "object" },                       // http/grpc
+        "request":  { "type": "object" },                       // http
         "name":     { "type": "string" },                       // sub_workflow
         "script":   { "type": "string" },                       // js
         "implementation": { "type": "object",
@@ -866,35 +881,35 @@ The full schema is delivered as `aflow.schema.json`. Skeleton:
 
 ## 17. Worked example
 
-A trimmed slice of `cancel_order_with_full_refund` in all three forms, exercising
-split → parallel order-lines → commit/rollback join → persist.
+A trimmed slice of the `change_order` reference workflow in all three forms,
+exercising split → parallel order-lines → change/rollback join → save.
 
 ### Flow graph
 
 ```mermaid
 flowchart TD
-    I[Input] --> AL[Add_Order_Lines<br/>split → order_line*]
-    AL --> R1{{Cancel_Order_Item_Router<br/>aggregate parent.items}}
-    R1 -->|per line, parallel| EV[Enrich → Build → Verify → Hold]
+    I[input] --> AL[add_order_lines<br/>split → order_line*]
+    AL --> R1{{change_order_item_router<br/>aggregate parent.items}}
+    R1 -->|per line, parallel| EV[enrich → build → verify → hold]
     EV --> R1
-    R1 -->|success| CR{{Supply_Commit_Rollback_Router<br/>aggregate 2-Phase lines}}
-    R1 -->|failure| UL[ODS_Unlock]
-    CR -->|commit| CO[Construct_Updated_Order]
+    R1 -->|success| CR{{change_rollback_router<br/>aggregate two_phase lines}}
+    R1 -->|failure| UL[rollback_changes]
+    CR -->|commit| CO[construct_updated_order]
     CR -->|rollback| UL
-    CO --> PS[Persistence_Save grpc<br/>durable, offline retry]
-    PS --> UL
-    UL --> RR[Return_Result / Return_Error]
+    CO --> PS[save_change http<br/>durable, offline retry]
+    PS --> RR[return_result / return_error]
+    UL --> RR
 ```
 
 ### JSON (canonical)
 
 ```jsonc
 {
-  "client_id": "ordering",
-  "name": "cancel_order_with_full_refund",
+  "client_id": "someclient",
+  "name": "change_order",
   "definitions": {
-    "input":  { "$ref": "#/definitions/CancelOrderWithFullRefundRequest" },
-    "result": { "$ref": "#/definitions/CancelOrderWithFullRefundResponse" }
+    "input":  { "$ref": "#/definitions/ChangeOrderRequest" },
+    "result": { "$ref": "#/definitions/ChangeOrderResponse" }
     /* … message types … */
   },
   "items": {
@@ -905,26 +920,27 @@ flowchart TD
     "defaults": { "item": { "target_state": "success", "allowed_target_states": ["success", "failure"] } }
   },
   "tasks": [
-    { "name": "Add_Order_Lines", "item": "input",
+    { "name": "add_order_lines", "item": "input",
       "split": { "itemType": "order_line",
                  "selector": { "$expr": "objects.order.order_items.map(oi => ({ order_item_id: oi.id }))" },
-                 "route": "Enrich_Order_Line", "parallel": true },
-      "route": "Cancel_Order_Item_Router" },
+                 "route": "enrich_order_line", "parallel": true },
+      "route": "change_order_item_router" },
 
-    { "name": "Cancel_Order_Item_Router", "item": "input",
+    { "name": "change_order_item_router", "item": "input",
       "aggregate": { "select": { "$expr": "items.filter(i => i.type==='order_line')" },
                      "until":  { "$expr": "set.every(i => i.next_task === null)" } },
       "target_state_setter": { "$expr": "items.find(i => i.target_state==='failure' && !i.optional) ? 'failure' : 'success'" },
-      "route": { "cases": { "success": "Supply_Commit_Rollback_Router", "failure": "ODS_Unlock_SubWF" } } },
+      "route": { "cases": { "success": "change_rollback_router", "failure": "rollback_changes" } } },
 
-    { "name": "Persistence_Save", "item": "input", "durable": true, "idempotent": true, "timeout": 4500,
+    { "name": "save_change", "item": "input", "durable": true, "idempotent": true, "timeout": 4500,
       "retry": { "inline": { "max_count": 0 }, "offline": { "max_count": 10, "interval": "5m" } },
-      "call": { "provider": "grpc",
-                "input": { "$expr": "objects.persist_request" },
-                "request": { "host": { "$expr": "parameters['persistence.grpc-host']" },
-                             "service_name": "…PersistenceServiceAPI", "operation": "Persist", "negotiation_type": "TLS" },
-                "output": { "resultType": "PersistResponse", "errorType": "Error" } },
-      "route": "ODS_Unlock_SubWF" }
+      "call": { "provider": "http",
+                "input": { "$expr": "objects.save_request" },
+                "request": { "method": "POST",
+                             "url": { "$expr": "`${parameters['persistence.base-url']}/orders/${data.order_id}`" },
+                             "body": { "$expr": "objects.save_request" } },
+                "output": { "resultType": "SaveResponse", "errorType": "Error" } },
+      "route": "return_result" }
   ]
 }
 ```
