@@ -1,0 +1,1282 @@
+openapi: 3.1.0
+
+# The schema dialect is declared explicitly so that the workflow-definition
+# schemas below (lifted verbatim from the specification's §16 `$defs`) are
+# interpreted as JSON Schema 2020-12 — including `oneOf`, `not`/`anyOf`
+# combinators and `type` arrays, none of which OpenAPI 3.0 could express.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+
+info:
+  title: AFlow Engine API
+  version: 0.1.0
+  summary: Register AFlow workflow definitions and evaluate them against input data.
+  description: |
+    HTTP surface for the **workflow evaluation engine** — artifact 4 of the AFlow
+    specification (`docs/aflow-workflow-spec.md`, §1 *Deliverable artifacts*):
+
+    > **input:** a workflow definition (conforming to the schema of artifact 1)
+    > plus an input request (conforming to the workflow's declared `input` type,
+    > §10);
+    > **output:** a response conforming to the workflow's declared `result` type,
+    > or a declared error;
+    > **behaviour:** drives the input item deterministically through the task
+    > graph to an end state per §12, with the guarantees of §8.
+
+    This document covers two resources:
+
+    * **Workflows** — a registry of canonical workflow JSON documents (§13),
+      addressed by `clientId` / `name` / `version`. Registering a definition is
+      what makes it referenceable by an evaluation request.
+    * **Evaluations** — one evaluation of one workflow against one input. An
+      evaluation may complete inside the request (`200`) or outlive it
+      (`202` + poll), because §8 permits asynchronous branches and §11 permits
+      offline retries scheduled minutes apart.
+
+    ## Determined failure is not an HTTP failure
+
+    §12 step 3 states that the default `Output` node maps the root item's
+    `target_state` to **either** `result` **or** `error`. Both are legitimate
+    outcomes of a correctly-executed workflow.
+
+    Accordingly:
+
+    * A workflow that determines `failure` and returns a declared error (§6.6)
+      yields **`200 OK`** with `status: failed` and the declared `error` body.
+      The engine did its job.
+    * Only transport- and contract-level problems yield `4xx`/`5xx` as
+      `application/problem+json`: a malformed request body, an unknown workflow
+      reference, or input that fails validation against the workflow's declared
+      `input` type (§10).
+
+    Collapsing these two would make *"the fraud check declined this order"*
+    indistinguishable from *"your JSON was broken"*.
+
+    ## Workflow-specific types
+
+    A workflow's `input` and `result` types are declared inside that workflow's
+    own `definitions` block (§10) and therefore cannot be pinned statically in
+    this document. The corresponding request and response members are typed as
+    unconstrained JSON and annotated with `x-aflow-type`, naming the pointer the
+    engine validates against. A future
+    `GET /workflows/{clientId}/{name}/{version}/openapi` may serve a
+    specialization of this document with those two members inlined from the
+    registered definition, enabling typed client generation.
+  license:
+    name: Proprietary
+  contact:
+    name: AFlow
+    url: https://aflow.dev
+
+servers:
+  - url: https://aflow.example.com/v1
+    description: Placeholder — replace with the deployed engine endpoint.
+  - url: /v1
+    description: Relative to the host serving this document.
+
+tags:
+  - name: Workflows
+    description: |
+      Registry of canonical workflow JSON documents (§13), validated against the
+      workflow schema (§16) on write.
+  - name: Evaluations
+    description: |
+      Evaluation of a workflow against input data, per the execution algorithm
+      of §12.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /workflows/{clientId}:
+    parameters:
+      - $ref: '#/components/parameters/ClientId'
+    get:
+      tags: [Workflows]
+      operationId: listWorkflows
+      summary: List workflow names registered for a client.
+      responses:
+        '200':
+          description: Workflow names, each with its latest registered version.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflows]
+                properties:
+                  workflows:
+                    type: array
+                    items: { $ref: '#/components/schemas/WorkflowSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workflows/{clientId}/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ClientId'
+      - $ref: '#/components/parameters/WorkflowName'
+    get:
+      tags: [Workflows]
+      operationId: listWorkflowVersions
+      summary: List registered versions of one workflow.
+      responses:
+        '200':
+          description: Registered versions, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [client_id, name, versions]
+                properties:
+                  client_id: { type: string }
+                  name: { type: string }
+                  versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/WorkflowVersionSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workflows/{clientId}/{name}/{version}:
+    parameters:
+      - $ref: '#/components/parameters/ClientId'
+      - $ref: '#/components/parameters/WorkflowName'
+      - $ref: '#/components/parameters/WorkflowVersion'
+    put:
+      tags: [Workflows]
+      operationId: putWorkflow
+      summary: Register or replace a workflow definition.
+      description: |
+        The request body is a canonical workflow JSON document (§13), validated
+        against the workflow schema (§16). This is the output of the DSL → plan
+        compiler (artifact 3).
+
+        **The path is authoritative.** `client_id` and `name` in the body must
+        either match the path or be omitted; a mismatch is `409`. The `version`
+        member of the body is *overwritten* by the path segment — the compiler
+        emits the literal placeholder `"<auto>"` for it (§13), which carries no
+        meaning to the registry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+          application/hjson:
+            schema:
+              type: string
+              description: |
+                The hjson authoring form (§14). Maps 1:1 to the JSON above; the
+                engine converts before validating. Offered for convenience —
+                `application/json` is the canonical wire form.
+      responses:
+        '200':
+          description: An existing version was replaced.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowVersionSummary' }
+        '201':
+          description: A new version was registered.
+          headers:
+            Location:
+              description: Canonical URL of the registered version.
+              schema: { type: string, format: uri-reference }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowVersionSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: |
+            The body's `client_id` or `name` contradicts the path.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422': { $ref: '#/components/responses/UnprocessableDefinition' }
+    get:
+      tags: [Workflows]
+      operationId: getWorkflow
+      summary: Fetch a registered workflow definition.
+      responses:
+        '200':
+          description: The canonical workflow JSON document (§13).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkflowDefinition' }
+            application/hjson:
+              schema:
+                type: string
+                description: The same document rendered as hjson (§14).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /evaluations:
+    post:
+      tags: [Evaluations]
+      operationId: createEvaluation
+      summary: Evaluate a workflow against input data.
+      description: |
+        Creates one evaluation. The workflow is supplied either **by reference**
+        to the registry or **inline** as a full definition; the input is the
+        payload the root item's `data` is populated from (§12 step 1).
+
+        The engine runs the algorithm of §12 until every item's `next_task` is
+        `null`, then maps the root's `target_state` to `result` or `error`.
+
+        ### Synchronous or asynchronous
+
+        The same `Evaluation` representation is returned either way; only the
+        status code and the `status` member differ.
+
+        * **`200`** — the evaluation reached a terminal state
+          (`succeeded`, `failed`) within `options.max_sync_wait_ms`.
+        * **`202`** — it did not, and is `running` or `suspended`. §8 async
+          branches may still be executing, or §11 has parked the run on an
+          offline retry whose `next_retry` is minutes away. `Location` gives the
+          polling URL and `Retry-After` a hint of when to poll.
+
+        ### Idempotency
+
+        Nodes may declare `durable` and `idempotent` (§4), but the engine cannot
+        deduplicate a *submission* it has no key for. Send `Idempotency-Key` to
+        make retried submissions collapse onto the existing evaluation rather
+        than starting a second one.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvaluationRequest' }
+      responses:
+        '200':
+          description: |
+            The evaluation is terminal. `status` is `succeeded` (with `result`)
+            or `failed` (with `error`) — see *Determined failure is not an HTTP
+            failure* in the document description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evaluation' }
+        '202':
+          description: |
+            Accepted and still in progress (`running`) or parked (`suspended`).
+            Poll `Location`.
+          headers:
+            Location:
+              description: Canonical URL of the evaluation.
+              schema: { type: string, format: uri-reference }
+            Retry-After:
+              description: |
+                Seconds to wait before polling. For a `suspended` evaluation
+                this is derived from the pending retry's `next_retry` (§11).
+              schema: { type: integer, minimum: 0 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evaluation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `workflow` was a reference and no such workflow or version is
+            registered.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422': { $ref: '#/components/responses/UnprocessableEvaluation' }
+
+  /evaluations/{evaluationId}:
+    parameters:
+      - $ref: '#/components/parameters/EvaluationId'
+    get:
+      tags: [Evaluations]
+      operationId: getEvaluation
+      summary: Fetch the current state of an evaluation.
+      description: |
+        Always `200` regardless of `status` — retrieving a `failed` or `running`
+        evaluation is a successful retrieval.
+      parameters:
+        - name: include_trace
+          in: query
+          required: false
+          description: |
+            Include the final (or current) item tree in the response, overriding
+            whatever was requested at submission time. See
+            `EvaluationOptions.include_trace`.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The evaluation in whatever state it currently occupies.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evaluation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Evaluations]
+      operationId: cancelEvaluation
+      summary: Cancel an in-progress or suspended evaluation.
+      description: |
+        Abandons the run and moves it to `cancelled`. Intended for evaluations
+        parked on §11 offline retries, where `max_count: 10` at `interval: 5m`
+        can otherwise hold a run for the better part of an hour.
+
+        Cancellation is not a rollback: effects already performed by `call`
+        bodies (§9) have happened and are not undone. Nothing further is
+        scheduled.
+
+        Cancelling an already-terminal evaluation is a no-op and returns its
+        unchanged representation.
+      responses:
+        '200':
+          description: |
+            The evaluation, now `cancelled` — or unchanged if it was already
+            terminal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evaluation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Placeholder scheme. The specification does not address authentication;
+        substitute the deployment's actual mechanism.
+
+  parameters:
+    ClientId:
+      name: clientId
+      in: path
+      required: true
+      description: Owning client — the `client_id` member of the definition (§13).
+      schema: { type: string, minLength: 1 }
+      example: someclient
+    WorkflowName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Workflow name — the `name` member of the definition (§13). Unique per
+        client.
+      schema: { type: string, minLength: 1 }
+      example: change_order
+    WorkflowVersion:
+      name: version
+      in: path
+      required: true
+      description: |
+        Version identifier. Opaque to the engine; ordering for "latest"
+        resolution is registration order, not lexical order.
+      schema: { type: string, minLength: 1 }
+      example: '1.4.0'
+    EvaluationId:
+      name: evaluationId
+      in: path
+      required: true
+      description: Engine-assigned evaluation identifier.
+      schema: { type: string, minLength: 1 }
+      example: ev_01HQ8T2XJ9K3M4N5P6Q7R8S9T0
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Caller-supplied deduplication key. A repeated submission carrying a key
+        already seen for the same `(workflow, input)` returns the existing
+        evaluation instead of creating a second one.
+      schema: { type: string, maxLength: 255 }
+
+  responses:
+    BadRequest:
+      description: The request body is malformed or structurally invalid.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: No such resource.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnprocessableDefinition:
+      description: |
+        The workflow definition is well-formed JSON but does not satisfy the
+        workflow schema (§16) or a static semantic rule — an unresolvable
+        `route` target, an item type whose declared `parent` does not exist, or
+        a node carrying more than one body kind (§6).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ValidationProblem' }
+    UnprocessableEvaluation:
+      description: |
+        The evaluation could not be started. Either `input` failed validation
+        against the workflow's declared `input` type (§10), or an inline
+        `definition` failed workflow-schema validation (§16).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ValidationProblem' }
+
+  schemas:
+
+    # ------------------------------------------------------------------
+    # Workflow definition — §13 document shape over §16 node schemas.
+    # ------------------------------------------------------------------
+
+    WorkflowDefinition:
+      title: AFlow workflow
+      description: |
+        Canonical machine form of a workflow (§13), validated by the workflow
+        schema (§16). Produced by the DSL → plan compiler and round-trippable
+        with the hjson authoring form (§14).
+      type: object
+      required: [client_id, name, definitions, items, tasks]
+      properties:
+        client_id:
+          type: string
+          description: Owning client.
+          examples: [someclient]
+        name:
+          type: string
+          description: Workflow name, unique per client. Also the sub-workflow key (§9).
+          examples: [change_order]
+        version:
+          type: string
+          description: |
+            Version identifier. The compiler emits the placeholder `"<auto>"`;
+            the registry overwrites it with the path segment on `PUT`.
+          examples: ['<auto>', '1.4.0']
+        definitions:
+          type: object
+          description: |
+            JSON-Schema definitions of every message type, travelling with the
+            workflow (§10). `input` and `result` are `$ref`s into this block and
+            are the types the engine validates evaluation requests and responses
+            against.
+          additionalProperties: true
+          examples:
+            - input: { $ref: '#/definitions/com.example.ChangeOrderRequest' }
+              result: { $ref: '#/definitions/com.example.ChangeOrderResponse' }
+        items:
+          type: object
+          description: |
+            Item type declarations (§10), binding each item type's `data`,
+            `objects` and `parent` types.
+          additionalProperties: { $ref: '#/components/schemas/ItemTypeDeclaration' }
+        config:
+          $ref: '#/components/schemas/WorkflowConfig'
+        tasks:
+          type: array
+          description: |
+            Ordered array of nodes (§4). Edges are implicit: a node's `name` is
+            the routing key another node's `route` names as `next_task`.
+          items: { $ref: '#/components/schemas/Node' }
+
+    ItemTypeDeclaration:
+      description: |
+        One item type (§10). `parent` is the type this item is split from, or
+        `null` for the root item type.
+      type: object
+      properties:
+        data: { $ref: '#/components/schemas/TypeRef' }
+        objects: { $ref: '#/components/schemas/TypeRef' }
+        parent:
+          type: [string, 'null']
+          description: Parent item type name, or `null` for the root type.
+      examples:
+        - data: { $ref: '#/definitions/OrderLineData' }
+          objects: { $ref: '#/definitions/OrderLineObjects' }
+          parent: input
+
+    WorkflowConfig:
+      description: |
+        Workflow-level configuration (§13): the type descriptor, libraries packed
+        with the workflow (§9), and defaults applied to items and tasks.
+      type: object
+      properties:
+        json_descriptor:
+          type: object
+          properties:
+            name: { type: string }
+          additionalProperties: true
+        bundles:
+          type: array
+          description: Libraries packed alongside the workflow, available to `js` calls (§9).
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              version: { type: string }
+        defaults:
+          type: object
+          properties:
+            item:
+              type: object
+              description: Default item attributes.
+              properties:
+                objects:
+                  type: object
+                  description: Initial `objects` every item starts with.
+                  additionalProperties: true
+                target_state:
+                  type: string
+                  description: Initial `target_state`.
+                  examples: [success]
+                allowed_target_states:
+                  type: array
+                  items: { type: string }
+                  examples: [[success, failure]]
+                default_target_state_setter: { $ref: '#/components/schemas/Expr' }
+              additionalProperties: true
+            task:
+              type: object
+              description: Default task route and error handling.
+              properties:
+                route: { $ref: '#/components/schemas/Route' }
+                default_error_handler:
+                  type: object
+                  description: |
+                    Applied when a node produces an unhandled error. `item`
+                    names the item type the handler runs against.
+                  properties:
+                    item: { type: string }
+                    $do: { type: string }
+                  additionalProperties: true
+              additionalProperties: true
+      additionalProperties: true
+
+    Expr:
+      title: Pure expression, statement block, or script
+      description: |
+        Embedded JavaScript (§5). `$expr` is a pure **expression** evaluated with
+        `this` bound to the current item; `$do` is a pure **statement block**
+        that assigns into `this`. A bare string is shorthand for `$expr`, which
+        is how the hjson form (§14) writes them.
+
+        Neither may perform I/O, mutate global state, read the clock or RNG, or
+        depend on arrival order: the engine evaluates them freely, repeatedly,
+        and during replay. All I/O belongs in a `call` body (§9).
+      oneOf:
+        - type: string
+          description: Shorthand for `$expr`.
+        - type: object
+          required: ['$expr']
+          properties:
+            $expr: { type: string }
+        - type: object
+          required: ['$do']
+          properties:
+            $do: { type: string }
+      examples:
+        - "set.every(i => i.next_task === null)"
+        - $expr: "objects.change_order_process.mode"
+        - $do: "objects.save_status = result.status"
+
+    TypeRef:
+      description: A `$ref` pointer into the workflow's `definitions` block (§10).
+      type: [object, 'null']
+      properties:
+        $ref: { type: string }
+      examples:
+        - { $ref: '#/definitions/OrderLineData' }
+
+    Route:
+      title: Routing target
+      description: |
+        Computes `next_task` (§4 route phase). Either a node name directly,
+        `null` to end the item's branch, or a `switch`/`cases` table. When
+        `switch` is omitted the workflow default applies — normally the item's
+        `target_state` (§13 `config.defaults.task.route`).
+      oneOf:
+        - type: [string, 'null']
+          description: Node name, or `null` to end this item's branch.
+        - type: object
+          required: [cases]
+          properties:
+            switch: { $ref: '#/components/schemas/Expr' }
+            cases:
+              type: object
+              additionalProperties:
+                type: [string, 'null']
+      examples:
+        - build_change_target
+        - null
+        - cases: { success: construct_updated_order, failure: rollback_changes }
+
+    Gate:
+      title: Wait / aggregate gate
+      description: |
+        The general synchronization mechanism (§7): `select` chooses the item set
+        to wait on, `until` is the fire condition over that set (bound as
+        `set`), and `reduce` folds the set into `this`.
+
+        Normative determinism constraints: `until` MUST be monotonic — once true
+        for a set it stays true (`every(done)`, `count(done) >= n`; never
+        "first to arrive") — and `reduce` MUST be commutative and associative
+        over the set, so the outcome cannot depend on member order (§8 rule 2).
+      type: object
+      properties:
+        select:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Expression returning the array of items to wait on.
+        until:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Monotonic predicate over the selected set, bound as `set`.
+        reduce:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Commutative, associative fold of the set into `this`.
+      examples:
+        - select: "items.filter(i => i.type === 'order_line')"
+          until: "set.every(i => i.next_task === null)"
+          reduce:
+            $do: "objects.all_committed = set.every(i => i.target_state === 'success')"
+
+    Retry:
+      description: |
+        Retry configuration for an effect task (§11). `max_count: 0` disables a
+        tier. Intervals are duration strings such as `5m`, `30s`, `1h`.
+      type: object
+      properties:
+        inline:
+          description: Retried in place at a fixed interval.
+          type: object
+          properties:
+            max_count: { type: integer, minimum: 0 }
+            interval: { type: string, examples: [30s] }
+        offline:
+          description: |
+            Scheduled out-of-band, interval growing exponentially up to
+            `max_interval`. Only the root workflow schedules offline retries;
+            a sub-workflow returns `retry_type: offline` to its parent (§11).
+          type: object
+          properties:
+            max_count: { type: integer, minimum: 0 }
+            interval: { type: string, examples: [5m] }
+            max_interval: { type: string, examples: [1h] }
+      examples:
+        - inline: { max_count: 0 }
+          offline: { max_count: 10, interval: 5m }
+
+    Node:
+      title: Node (task)
+      description: |
+        The single node primitive (§4). A node binds to an item type and runs up
+        to four ordered phases, any of which may be omitted:
+
+        1. **gate** — `condition`, plus optional `await` (`select` + `until`)
+        2. **body** — at most one kind (§6)
+        3. **state** — `target_state_setter`
+        4. **route** — `route`
+
+        A routing-only node omits the body entirely and carries just `route`.
+      type: object
+      required: [name, item]
+      properties:
+        name:
+          type: string
+          description: Node name. This is the routing key other nodes target as `next_task`.
+        item:
+          type: string
+          description: Item type this node applies to — the `this` binding.
+        condition:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Gate predicate. Defaults to always firing.
+        await:
+          allOf: [{ $ref: '#/components/schemas/Gate' }]
+          description: |
+            Optional synchronization gate (§7). While `until` does not hold, the
+            item is `Waiting` and the node does not fire. Blocking is on data,
+            not wall-clock.
+        async:
+          type: boolean
+          default: false
+          description: |
+            Spawn this node's branch asynchronously (§8): the flow continues past
+            it without waiting, and the branch runs on an isolated write view
+            until its `next_task` is `null`.
+        durable:
+          type: boolean
+          default: false
+          description: Persist state before running, so the node survives a crash.
+        idempotent:
+          type: boolean
+          default: false
+          description: Safe to re-execute — a precondition for retrying a non-replayable effect.
+        timeout:
+          type: integer
+          minimum: 0
+          description: Milliseconds before the node's effect is abandoned as an error.
+        retry: { $ref: '#/components/schemas/Retry' }
+        target_state_setter:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Computes the item's `target_state` — the value routing and aggregation branch on.
+        route: { $ref: '#/components/schemas/Route' }
+
+        # ---- body kinds (§6): at most one, enforced by `allOf`/`not` below ----
+        enrich:
+          description: |
+            Pure body writing into `this` — `objects`, `data`, `logging_context`
+            (§6.1). Performs no I/O.
+          type: object
+          properties:
+            $do: { type: string }
+        split:
+          description: |
+            Create child items of `this` (§6.3). `selector` returns an array;
+            each element becomes one child's `data`.
+          type: object
+          required: [itemType, selector]
+          properties:
+            itemType:
+              type: string
+              description: Item type of the produced children.
+            selector: { $ref: '#/components/schemas/Expr' }
+            route:
+              type: [string, 'null']
+              description: Node each produced child starts at.
+            parallel:
+              type: boolean
+              default: false
+              description: Spawn one asynchronous branch per produced child (§8).
+        aggregate:
+          allOf: [{ $ref: '#/components/schemas/Gate' }]
+          description: Wait-then-reduce over a selected item set — the join body (§6.4, §7).
+        call: { $ref: '#/components/schemas/Call' }
+        return:
+          description: |
+            Terminal body (§6.6): emit the workflow `result` or `error` and end
+            the branch. Exactly one of the two.
+          type: object
+          properties:
+            result: { $ref: '#/components/schemas/Expr' }
+            error: { $ref: '#/components/schemas/Expr' }
+      # A node carries AT MOST ONE body kind (enrich|split|aggregate|call|return).
+      # Reproduced from §16 — this is the rule OpenAPI 3.0 could not express.
+      allOf:
+        - not:
+            anyOf:
+              - required: [enrich, split]
+              - required: [enrich, aggregate]
+              - required: [enrich, call]
+              - required: [enrich, return]
+              - required: [split, aggregate]
+              - required: [split, call]
+              - required: [split, return]
+              - required: [aggregate, call]
+              - required: [aggregate, return]
+              - required: [call, return]
+      examples:
+        - name: add_order_lines
+          item: input
+          split:
+            itemType: order_line
+            selector: "objects.order.order_items.map(oi => ({ order_item_id: oi.id }))"
+            route: enrich_order_line
+            parallel: true
+          route: change_order_item_router
+        - name: change_order_item_router
+          item: input
+          aggregate:
+            select: "items.filter(i => i.type === 'order_line')"
+            until: "set.every(i => i.next_task === null)"
+          target_state_setter: "items.find(i => i.target_state === 'failure' && !i.optional) ? 'failure' : 'success'"
+          route:
+            cases: { success: change_rollback_router, failure: rollback_changes }
+
+    Call:
+      title: Effect body
+      description: |
+        The only body that performs I/O (§9). The result is captured into
+        `this.tasks[name].result`, so every downstream expression reads a
+        recorded value rather than a live call — which is what makes the
+        determinism guarantee of §8 and the replay/retry of §11 sound.
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          description: |
+            * `http` — declarative HTTP request; retried on 5xx/IO per §11.
+            * `sub_workflow` — invoke another workflow by `name`; its
+              `result`/`error` is captured, and offline retries bubble to the
+              root.
+            * `js` — inline JavaScript, which may call external APIs.
+          enum: [http, sub_workflow, js]
+        input:
+          allOf: [{ $ref: '#/components/schemas/Expr' }]
+          description: Pure expression computing the effect's input payload.
+        output:
+          description: |
+            Pure transformation of the captured result. May turn even a
+            successful response into an error to trigger a retry (§11); this is
+            evaluated before `enrich`.
+          type: object
+          properties:
+            resultType:
+              type: string
+              description: Type name in `definitions` the result is validated against.
+            errorType:
+              type: string
+              description: Type name in `definitions` the error is validated against.
+            enrich: { $ref: '#/components/schemas/Expr' }
+        request:
+          description: '`http` only — the declarative request.'
+          type: object
+          properties:
+            method:
+              type: string
+              enum: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+            url: { $ref: '#/components/schemas/Expr' }
+            headers: { $ref: '#/components/schemas/Expr' }
+            body: { $ref: '#/components/schemas/Expr' }
+          additionalProperties: true
+        name:
+          type: string
+          description: '`sub_workflow` only — name of the workflow to invoke.'
+        script:
+          type: string
+          description: |
+            `js` only — the sandboxed function source. Invoked with two
+            arguments: the computed `input` and the resolved library namespace
+            `lib`. Its return value or thrown error is captured like any effect
+            result and is subject to retry.
+          examples: ['async (input, lib) => { return await lib.score(input); }']
+        implementation:
+          description: |
+            `js` only — resolve `lib` from a bundle packed alongside the workflow
+            (`config.bundles`, §13).
+          type: object
+          properties:
+            bundle_name: { type: string }
+            bundle_version: { type: string }
+            entry: { type: string }
+        registry:
+          description: '`js` only — resolve `lib` from an external artifactory instead.'
+          type: object
+          properties:
+            url: { type: string, format: uri }
+            ref: { type: string, examples: ['@org/fraud-utils@1.4.0'] }
+      examples:
+        - provider: http
+          input: "objects.save_request"
+          request:
+            method: POST
+            url: "`${parameters['persistence.base-url']}/orders/${data.order_id}`"
+            body: "objects.save_request"
+          output: { resultType: SaveResponse, errorType: Error }
+
+    # ------------------------------------------------------------------
+    # Registry listings
+    # ------------------------------------------------------------------
+
+    WorkflowSummary:
+      type: object
+      required: [client_id, name]
+      properties:
+        client_id: { type: string }
+        name: { type: string }
+        latest_version:
+          type: [string, 'null']
+          description: Most recently registered version, or `null` if none.
+        version_count: { type: integer, minimum: 0 }
+
+    WorkflowVersionSummary:
+      type: object
+      required: [client_id, name, version]
+      properties:
+        client_id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        registered_at: { type: string, format: date-time }
+        checksum:
+          type: string
+          description: Digest of the canonical JSON, for detecting drift between compiler output and registry content.
+
+    # ------------------------------------------------------------------
+    # Evaluation request
+    # ------------------------------------------------------------------
+
+    EvaluationRequest:
+      title: Evaluation request
+      description: |
+        The two inputs of §1 artifact 4: the workflow to run, and the data to run
+        it on.
+      type: object
+      required: [workflow, input]
+      properties:
+        workflow: { $ref: '#/components/schemas/WorkflowSource' }
+        input:
+          description: |
+            The workflow input. Becomes the root item's `data`, from which the
+            default `Input` node populates the root (§12 step 1).
+
+            Its type is whatever the workflow's own `definitions.input` `$ref`
+            resolves to (§10) and so cannot be pinned here; the engine validates
+            against that schema and answers `422` on failure.
+          x-aflow-type: '#/definitions/input'
+        options: { $ref: '#/components/schemas/EvaluationOptions' }
+      examples:
+        - workflow: { clientId: someclient, name: change_order, version: '1.4.0' }
+          input:
+            order_id: '123456'
+            order_item_ids: ['1', '2', '3']
+          options: { include_trace: false, max_sync_wait_ms: 5000 }
+
+    WorkflowSource:
+      title: Workflow source
+      description: |
+        How the engine obtains the definition to evaluate: a reference into the
+        registry, or a full definition supplied inline.
+      oneOf:
+        - $ref: '#/components/schemas/WorkflowRef'
+        - $ref: '#/components/schemas/WorkflowInline'
+
+    WorkflowRef:
+      title: Registry reference
+      description: A previously registered workflow.
+      type: object
+      required: [clientId, name]
+      properties:
+        clientId: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        version:
+          type: string
+          description: |
+            Omit to resolve the latest registered version. The version actually
+            resolved is echoed in the response's `workflow`, so an evaluation is
+            always attributable to one concrete definition.
+      additionalProperties: false
+      examples:
+        - { clientId: someclient, name: change_order, version: '1.4.0' }
+
+    WorkflowInline:
+      title: Inline definition
+      description: |
+        A full definition supplied with the request, evaluated without being
+        registered. Intended for development and testing; it is validated
+        against the workflow schema (§16) exactly as a registered one is.
+      type: object
+      required: [definition]
+      properties:
+        definition: { $ref: '#/components/schemas/WorkflowDefinition' }
+      additionalProperties: false
+
+    EvaluationOptions:
+      type: object
+      properties:
+        include_trace:
+          type: boolean
+          default: false
+          description: |
+            Include the item tree (§3) in the response, with each item's `tasks`
+            records. Off by default because the tree grows with item count — a
+            `split` over 500 order lines produces 500 subtrees.
+        max_sync_wait_ms:
+          type: integer
+          minimum: 0
+          default: 5000
+          description: |
+            How long to hold the request waiting for a terminal state before
+            answering `202`. `0` returns `202` immediately.
+      additionalProperties: false
+
+    # ------------------------------------------------------------------
+    # Evaluation response
+    # ------------------------------------------------------------------
+
+    Evaluation:
+      title: Evaluation
+      description: |
+        One evaluation of one workflow against one input — the output side of §1
+        artifact 4. The same representation is returned by `POST` (as `200` or
+        `202`) and by `GET`; `status` is what distinguishes them.
+      type: object
+      required: [id, status, workflow, submitted_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: Engine-assigned identifier.
+          examples: [ev_01HQ8T2XJ9K3M4N5P6Q7R8S9T0]
+        status: { $ref: '#/components/schemas/EvaluationStatus' }
+        workflow:
+          allOf: [{ $ref: '#/components/schemas/WorkflowRef' }]
+          description: |
+            The *resolved* workflow, with `version` always populated — including
+            when the request omitted it or supplied the definition inline.
+        target_state:
+          type: [string, 'null']
+          description: |
+            The root item's `target_state` (§3), which the default `Output` node
+            maps to `result` or `error` (§12 step 3). `null` until terminal.
+          examples: [success, failure]
+        submitted_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+          description: Present once `status` is terminal.
+        result:
+          description: |
+            Present when `status` is `succeeded`. Conforms to the workflow's
+            declared `definitions.result` type (§10), which cannot be pinned
+            here — see `x-aflow-type`.
+          x-aflow-type: '#/definitions/result'
+        error:
+          allOf: [{ $ref: '#/components/schemas/WorkflowError' }]
+          description: |
+            Present when `status` is `failed`. This is the workflow's **declared
+            error** (§6.6) — a determined outcome, not a transport problem, which
+            is why it arrives with `200`.
+        suspension:
+          allOf: [{ $ref: '#/components/schemas/Suspension' }]
+          description: Present when `status` is `suspended`.
+        trace:
+          allOf: [{ $ref: '#/components/schemas/Item' }]
+          description: |
+            The root item and, recursively, every item created during evaluation
+            (§3). Present only when `include_trace` was requested.
+      examples:
+        - id: ev_01HQ8T2XJ9K3M4N5P6Q7R8S9T0
+          status: succeeded
+          workflow: { clientId: someclient, name: change_order, version: '1.4.0' }
+          target_state: success
+          submitted_at: '2026-07-31T10:15:30Z'
+          updated_at: '2026-07-31T10:15:31Z'
+          completed_at: '2026-07-31T10:15:31Z'
+          result:
+            order_id: '123456'
+            status: CHANGED
+        - id: ev_01HQ8T2XJ9K3M4N5P6Q7R8S9T1
+          status: suspended
+          workflow: { clientId: someclient, name: change_order, version: '1.4.0' }
+          target_state: null
+          submitted_at: '2026-07-31T10:15:30Z'
+          updated_at: '2026-07-31T10:15:35Z'
+          completed_at: null
+          suspension:
+            reason: offline_retry
+            task: save_change
+            attempt: 3
+            next_retry_at: '2026-07-31T10:20:35Z'
+
+    EvaluationStatus:
+      description: |
+        * `running` — items remain with a non-null `next_task` and work is
+          progressing (§12 step 2).
+        * `suspended` — no progress is possible until a scheduled event: an
+          offline retry's `next_retry` (§11), or an awaited async branch (§8).
+        * `succeeded` — terminal; the root's `target_state` mapped to `result`.
+        * `failed` — terminal; it mapped to a declared `error` (§6.6).
+        * `cancelled` — terminal; abandoned via `DELETE`. Effects already
+          performed are not undone.
+      type: string
+      enum: [running, suspended, succeeded, failed, cancelled]
+
+    WorkflowError:
+      title: Declared workflow error
+      description: |
+        The error shape a workflow emits from a `return` body (§6.6) and the
+        shape recorded on a task record (§3). A *determined* failure — carried on
+        a `200` response, not a `4xx`.
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: Author-defined error code.
+          examples: [7001, 500]
+        category:
+          type: string
+          description: Author-defined classification.
+          examples: [TECHNICAL, BUSINESS]
+        message: { type: string }
+        data:
+          description: Arbitrary author-supplied detail.
+        retry_type:
+          type: [string, 'null']
+          enum: [inline, offline, inline_then_offline, null]
+          description: |
+            Retry disposition requested by the effect, resolved against the
+            task's `retry` config (§11).
+        next_retry:
+          type: [string, 'null']
+          format: date-time
+          description: When the next retry is scheduled, for `offline`.
+      additionalProperties: true
+
+    Suspension:
+      description: Why an evaluation is making no progress, and when that changes.
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [offline_retry, await]
+          description: |
+            * `offline_retry` — a `call` failed and is parked until
+              `next_retry_at` (§11).
+            * `await` — a gated node is `Waiting` on an async branch or an
+              `until` that does not yet hold (§7, §8).
+        task:
+          type: string
+          description: Name of the node the evaluation is parked on.
+        item_id:
+          type: string
+          description: Item whose branch is parked.
+        attempt:
+          type: integer
+          minimum: 0
+          description: Retry attempts already made, for `offline_retry`.
+        next_retry_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            When work resumes. `null` for `await`, which is released by data
+            rather than by the clock (§7).
+
+    Item:
+      title: Item
+      description: |
+        A part of the input, or data created during evaluation (§3). Items form a
+        tree; this schema is recursive through `items`. Returned only in `trace`.
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: string }
+        type:
+          type: string
+          description: Item type, which selects the nodes that apply.
+          examples: [input, order_line]
+        parent:
+          type: [string, 'null']
+          description: Id of the item this was split from or created by; `null` for the root.
+        items:
+          type: array
+          description: Items created or split from this one.
+          items: { $ref: '#/components/schemas/Item' }
+        data:
+          description: Typed payload. For the root item, the workflow input.
+        objects:
+          description: Typed working state, grown by `enrich` bodies and effect `output`.
+        tasks:
+          type: object
+          description: |
+            One record per node this item visited, keyed by node name. Effect
+            results and errors are captured here so replay, retry and
+            aggregation read recorded values rather than live I/O (§5).
+          additionalProperties: { $ref: '#/components/schemas/TaskRecord' }
+        next_task:
+          type: [string, 'null']
+          description: |
+            Routing target. `null` marks this item's branch complete; when every
+            item is `null`, evaluation terminates (§3, §12).
+        target_state:
+          type: string
+          description: Author-defined disposition that routing and aggregation branch on.
+        logging_context:
+          type: object
+          additionalProperties: true
+        additional_properties:
+          type: object
+          additionalProperties: true
+      examples:
+        - id: '123456'
+          type: order_line
+          parent: '1'
+          items: []
+          data: { order_item_id: '1' }
+          objects: { change_order_process: { transaction_mode: two_phase } }
+          tasks:
+            verify_change:
+              id: '1234567'
+              status: success
+              started: '2026-07-31T10:15:30Z'
+              updated: '2026-07-31T10:15:31Z'
+              result: { verified: true }
+          next_task: null
+          target_state: success
+
+    TaskRecord:
+      description: Recorded state of one node visit by one item (§3).
+      type: object
+      required: [status]
+      properties:
+        id: { type: string }
+        status:
+          type: string
+          enum: [success, failure, pending, error]
+        started: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+        result:
+          description: |
+            The captured effect or body output. Downstream expressions read this
+            value, never the live call (§5).
+        error: { $ref: '#/components/schemas/WorkflowError' }
+
+    # ------------------------------------------------------------------
+    # Transport-level problems (RFC 9457)
+    # ------------------------------------------------------------------
+
+    Problem:
+      title: Problem details
+      description: |
+        RFC 9457 problem details, used for transport- and contract-level failures
+        only. A workflow that *determines* a failure returns `200` with an
+        `Evaluation` whose `status` is `failed`.
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable identifier for the problem kind.
+          examples: ['https://aflow.dev/problems/workflow-not-found']
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance:
+          type: string
+          format: uri-reference
+          description: URI of the specific occurrence.
+      additionalProperties: true
+
+    ValidationProblem:
+      title: Validation problem details
+      description: |
+        A `Problem` carrying per-violation detail, returned when a workflow
+        definition fails the workflow schema (§16) or input fails the workflow's
+        declared `input` type (§10).
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          properties:
+            errors:
+              type: array
+              items:
+                type: object
+                required: [message]
+                properties:
+                  instancePath:
+                    type: string
+                    description: JSON Pointer into the submitted document.
+                    examples: ['/tasks/3/call']
+                  schemaPath:
+                    type: string
+                    description: JSON Pointer into the schema that rejected it.
+                    examples: ['#/$defs/node/allOf/0/not']
+                  message: { type: string }
+      examples:
+        - type: 'https://aflow.dev/problems/invalid-workflow-definition'
+          title: Workflow definition failed validation
+          status: 422
+          detail: The definition does not satisfy the AFlow workflow schema.
+          errors:
+            - instancePath: '/tasks/3'
+              schemaPath: '#/$defs/node/allOf/0/not'
+              message: node carries more than one body kind (`enrich` and `call`)
+            - instancePath: '/tasks/5/route/cases/failure'
+              schemaPath: '#/$defs/route'
+              message: route target `rollback_change` matches no node name
