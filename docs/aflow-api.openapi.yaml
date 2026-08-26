@@ -547,6 +547,25 @@ components:
                     $do: { type: string }
                   additionalProperties: true
               additionalProperties: true
+            concurrency:
+              type: object
+              description: |
+                §19 E5. A resource control only: §8 guarantees the outcome does
+                not depend on scheduling, so changing the cap must not change
+                the result.
+              properties:
+                max_parallel:
+                  type: integer
+                  minimum: 1
+                  description: Cap on simultaneously-running `call` bodies.
+                  examples: [8]
+              additionalProperties: false
+            entry:
+              type: string
+              description: |
+                §19 E5. Node the root item starts on. Defaults to `Input`, then
+                to the first node bound to the root item type.
+              examples: [Input]
       additionalProperties: true
 
     Expr:
@@ -587,13 +606,22 @@ components:
     Route:
       title: Routing target
       description: |
-        Computes `next_task` (§4 route phase). Either a node name directly,
-        `null` to end the item's branch, or a `switch`/`cases` table. When
-        `switch` is omitted the workflow default applies — normally the item's
-        `target_state` (§13 `config.defaults.task.route`).
+        Computes `next_task` (§4 route phase). A node name directly, `null` to
+        end the item's branch, a `switch`/`cases` table, or a `$expr` evaluating
+        to a node name or `null`. When `switch` is omitted the workflow default
+        applies — normally the item's `target_state`
+        (§13 `config.defaults.task.route`).
+
+        A `cases` table with no matching key and no `default` is an error, not a
+        silently-ended branch.
       oneOf:
         - type: [string, 'null']
           description: Node name, or `null` to end this item's branch.
+        - type: object
+          required: ['$expr']
+          description: Pure expression yielding a node name or `null`.
+          properties:
+            $expr: { type: string }
         - type: object
           required: [cases]
           properties:
@@ -602,10 +630,14 @@ components:
               type: object
               additionalProperties:
                 type: [string, 'null']
+            default:
+              type: [string, 'null']
+              description: Fallback when no case matches.
       examples:
         - build_change_target
         - null
         - cases: { success: construct_updated_order, failure: rollback_changes }
+        - $expr: "type === 'hotel_line' ? 'commit_hotel' : 'confirm_flight'"
 
     Gate:
       title: Wait / aggregate gate
@@ -728,16 +760,29 @@ components:
           description: |
             Create child items of `this` (§6.3). `selector` returns an array;
             each element becomes one child's `data`.
+
+            `itemType` and `route` accept an expression evaluated once per
+            produced child (§19 E1), so one split can produce several item types
+            and send them down different paths. While `itemType` is evaluated the
+            child does not exist yet, so its scope is `data` (the selector
+            element), `index`, `parent`, `root`, `parameters` and `ctx`.
           type: object
           required: [itemType, selector]
           properties:
             itemType:
-              type: string
-              description: Item type of the produced children.
+              description: |
+                Item type of the produced children. A bare string is a literal
+                type name; the `$expr` form is evaluated per child (§19 E1).
+              oneOf:
+                - type: string
+                - type: object
+                  required: ['$expr']
+                  properties:
+                    $expr: { type: string }
             selector: { $ref: '#/components/schemas/Expr' }
             route:
-              type: [string, 'null']
-              description: Node each produced child starts at.
+              allOf: [{ $ref: '#/components/schemas/Route' }]
+              description: Node each produced child starts at; per-child when an expression (§19 E1).
             parallel:
               type: boolean
               default: false
@@ -745,6 +790,26 @@ components:
         aggregate:
           allOf: [{ $ref: '#/components/schemas/Gate' }]
           description: Wait-then-reduce over a selected item set — the join body (§6.4, §7).
+        dispatch:
+          description: |
+            The inverse of `aggregate` (§19 E4): select existing items and set
+            each one's `next_task`, re-activating branches that had ended. `route`
+            is evaluated once per selected item with `this` bound to that item, so
+            one dispatch can fan a heterogeneous set onto different nodes.
+
+            Pure — it writes `next_task` and nothing else. Dispatching an item
+            that is mid-visit is an error. This is the mechanism §17's
+            `change_rollback_router` needs to drive its children into a commit or
+            rollback phase.
+          type: object
+          required: [select, route]
+          properties:
+            select:
+              allOf: [{ $ref: '#/components/schemas/Expr' }]
+              description: Pure expression returning the items to re-activate.
+            route:
+              allOf: [{ $ref: '#/components/schemas/Route' }]
+              description: Evaluated per selected item; `null` leaves that branch ended.
         call: { $ref: '#/components/schemas/Call' }
         return:
           description: |
@@ -754,20 +819,26 @@ components:
           properties:
             result: { $ref: '#/components/schemas/Expr' }
             error: { $ref: '#/components/schemas/Expr' }
-      # A node carries AT MOST ONE body kind (enrich|split|aggregate|call|return).
+      # A node carries AT MOST ONE body kind
+      # (enrich|split|aggregate|dispatch|call|return).
       # Reproduced from §16 — this is the rule OpenAPI 3.0 could not express.
       allOf:
         - not:
             anyOf:
               - required: [enrich, split]
               - required: [enrich, aggregate]
+              - required: [enrich, dispatch]
               - required: [enrich, call]
               - required: [enrich, return]
               - required: [split, aggregate]
+              - required: [split, dispatch]
               - required: [split, call]
               - required: [split, return]
+              - required: [aggregate, dispatch]
               - required: [aggregate, call]
               - required: [aggregate, return]
+              - required: [dispatch, call]
+              - required: [dispatch, return]
               - required: [call, return]
       examples:
         - name: add_order_lines
@@ -786,6 +857,13 @@ components:
           target_state_setter: "items.find(i => i.target_state === 'failure' && !i.optional) ? 'failure' : 'success'"
           route:
             cases: { success: change_rollback_router, failure: rollback_changes }
+        - name: commit_or_rollback
+          item: input
+          dispatch:
+            select: "items"
+            route:
+              $expr: "root.objects.all_committed ? 'commit_change' : 'rollback_change'"
+          route: await_settlement
 
     Call:
       title: Effect body
@@ -972,8 +1050,16 @@ components:
           default: false
           description: |
             Include the item tree (§3) in the response, with each item's `tasks`
-            records. Off by default because the tree grows with item count — a
-            `split` over 500 order lines produces 500 subtrees.
+            records and `trajectory` (§19 E2). Off by default because the tree
+            grows with item count — a `split` over 500 order lines produces 500
+            subtrees.
+        include_trajectory:
+          type: boolean
+          default: false
+          description: |
+            §19 E2. Include the flat cross-item visit log. Diagnostics only: it
+            is in completion order and therefore scheduling-dependent, which is
+            why expressions cannot reach it (§8, §19 E3).
         max_sync_wait_ms:
           type: integer
           minimum: 0
@@ -1038,6 +1124,14 @@ components:
           description: |
             The root item and, recursively, every item created during evaluation
             (§3). Present only when `include_trace` was requested.
+        trajectory:
+          type: array
+          description: |
+            §19 E2. Every node visit by every item, in completion order. Present
+            only when `include_trajectory` was requested. Diagnostics only —
+            this ordering is scheduling-dependent, so nothing in the workflow may
+            branch on it (§8).
+          items: { $ref: '#/components/schemas/TrajectoryEntry' }
       examples:
         - id: ev_01HQ8T2XJ9K3M4N5P6Q7R8S9T0
           status: succeeded
@@ -1164,10 +1258,22 @@ components:
         tasks:
           type: object
           description: |
-            One record per node this item visited, keyed by node name. Effect
-            results and errors are captured here so replay, retry and
+            The **latest** record per node this item visited, keyed by node name.
+            Effect results and errors are captured here so replay, retry and
             aggregation read recorded values rather than live I/O (§5).
           additionalProperties: { $ref: '#/components/schemas/TaskRecord' }
+        trajectory:
+          type: array
+          description: |
+            §19 E2. The ordered, append-only log of this item's node visits. A
+            node visited more than once — a rollback phase, a re-dispatch —
+            appears once per visit, where `tasks` keeps only the last.
+
+            `seq` orders the visits of **this item**, which is
+            scheduling-independent: an item has one `next_task`, so its visits
+            are strictly sequential. There is deliberately no cross-item
+            chronological ordering here; see `Evaluation.trajectory`.
+          items: { $ref: '#/components/schemas/TrajectoryEntry' }
         next_task:
           type: [string, 'null']
           description: |
@@ -1200,7 +1306,9 @@ components:
           target_state: success
 
     TaskRecord:
-      description: Recorded state of one node visit by one item (§3).
+      description: |
+        Recorded state of the latest visit of one node by one item (§3). For the
+        full ordered history, see `Item.trajectory` (§19 E2).
       type: object
       required: [status]
       properties:
@@ -1210,11 +1318,68 @@ components:
           enum: [success, failure, pending, error]
         started: { type: string, format: date-time }
         updated: { type: string, format: date-time }
+        attempts:
+          type: integer
+          minimum: 1
+          description: |
+            §19 E2. How many times this item has visited this node. Counts
+            visits, not §11 inline retries — those happen inside one visit.
         result:
           description: |
             The captured effect or body output. Downstream expressions read this
             value, never the live call (§5).
         error: { $ref: '#/components/schemas/WorkflowError' }
+
+    TrajectoryEntry:
+      title: Trajectory entry
+      description: |
+        §19 E2. One node visit by one item: which item, which node, what it
+        produced, and where it routed next. Appended, never overwritten.
+      type: object
+      required: [seq, item_id, task, status]
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: Sequence number within this item's trajectory, from 0.
+        item_id: { type: string }
+        item_type: { type: string }
+        task:
+          type: string
+          description: Node name.
+        attempt:
+          type: integer
+          minimum: 1
+          description: Visit ordinal for this (item, node) pair.
+        status:
+          type: string
+          enum: [success, failure, pending, error, skipped]
+          description: |
+            `pending` is written when an `async` node spawns its branch; the
+            settled entry follows when the branch completes (§19 Interpretations).
+        started: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+        target_state:
+          type: [string, 'null']
+          description: The item's `target_state` after this visit's state phase.
+        next_task:
+          type: [string, 'null']
+          description: The item's `next_task` after this visit's route phase.
+        result:
+          description: The captured effect or body output for this visit.
+        error: { $ref: '#/components/schemas/WorkflowError' }
+      examples:
+        - seq: 3
+          item_id: '1.1'
+          item_type: hotel_line
+          task: commit_hotel_booking
+          attempt: 1
+          status: success
+          started: '2026-07-31T10:15:31Z'
+          updated: '2026-07-31T10:15:31Z'
+          target_state: success
+          next_task: mark_hotel_settled
+          result: { confirmation: HTL-ORD-1001-OL-1 }
 
     # ------------------------------------------------------------------
     # Transport-level problems (RFC 9457)

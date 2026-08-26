@@ -28,6 +28,7 @@
 16. [JSON Schema (normative skeleton)](#16-json-schema-normative-skeleton)
 17. [Worked example](#17-worked-example)
 18. [Glossary](#18-glossary)
+19. [Engine extensions (E1–E5)](#19-engine-extensions-e1e5)
 
 ---
 
@@ -72,6 +73,10 @@ interface:
      a declared error;
    - **behaviour:** drives the input item deterministically through the task graph
      to an end state per §12, with the guarantees of §8.
+
+   Implemented in TypeScript for Node under `src/` (`@aflow/engine`); its HTTP
+   surface is `docs/aflow-api.openapi.yaml`. The extensions it required of §16
+   are §19.
 
 ### Non-goals
 
@@ -124,17 +129,24 @@ one item structure (following the PDF "Draft"):
   "data":    { /* typed payload; for the root this is the workflow input */ },
   "objects": { /* typed working state, grown by `enrich` and effect `output` */ },
 
-  "tasks": {                      // recorded state, one entry per node this item visited
+  "tasks": {                      // latest record per node this item visited
     "verify_change": {
       "id": "1234567",
       "status": "success",        // success | failure | pending | error
       "started": "2020-12-03T10:15:30+01:00",
       "updated": "2020-12-03T10:15:30+02:00",
+      "attempts": 1,              // §19 E2 — visits of this node by this item
       "result": { /* effect/output data */ },
       "error":  { "code": 7001, "category": "TECHNICAL", "message": "…",
                   "data": { /* … */ }, "next_retry": "…", "retry_type": "offline" }
     }
   },
+
+  "trajectory": [                 // §19 E2 — ordered, append-only visit log
+    { "seq": 0, "task": "verify_change", "attempt": 1, "status": "success",
+      "target_state": "success", "next_task": "make_change",
+      "started": "…", "updated": "…", "result": { /* … */ }, "error": null }
+  ],
 
   "next_task": "make_change",   // routing target; null ⇒ this item's branch is complete
   "target_state": "success",      // author-defined disposition
@@ -152,9 +164,14 @@ one item structure (following the PDF "Draft"):
 - `next_task === null` marks the end of an item's branch. When *all* items are
   `null`, evaluation terminates and the default `Output` node maps the root's
   `target_state` to `result` or `error`.
-- `tasks[name]` accumulates one record per visited node. Effect results and errors
-  are captured here so replay/retry/aggregation read recorded values, never live
-  I/O.
+- `tasks[name]` holds the **latest** record for that node, with `attempts`
+  counting the visits. Effect results and errors are captured here so
+  replay/retry/aggregation read recorded values, never live I/O.
+- `trajectory` is the **ordered, append-only** log of visits (§19 E2). A node
+  visited twice — a rollback phase, a re-dispatch — appears twice, in order,
+  where `tasks[name]` would have kept only the last. Ordering is meaningful
+  only *within* one item; see §19 E3 for why there is no cross-item
+  chronological log.
 
 Item lifecycle:
 
@@ -226,9 +243,14 @@ effect `input`, and effect `output` transforms. They:
 
 - are evaluated by the engine freely, at any time, possibly repeatedly (scheduling,
   aggregation, replay);
-- may read `this` and the reachable tree (`parent`, `items`, `root`, `tasks`);
+- may read `this` and the reachable tree (`parent`, `items`, `root`, `tasks`),
+  plus the whole evaluation context through `ctx` (§19 E3);
 - may **not** perform I/O, mutate global state, read the clock/RNG, or depend on
   arrival order. They are deterministic functions of the item tree.
+
+An engine MUST enforce this rather than trust it: naming `Date`, `Math.random`,
+`fetch`, `require`, `Promise` or the host scope inside a `$expr`/`$do` is an
+error, not an undefined behaviour.
 
 The expression language is JavaScript restricted to pure evaluation : collection filtering/among items —
 `items.filter(i => i.type==='order_line')`, quorum —
@@ -265,8 +287,9 @@ Exactly one body kind per node.
 |---|---|---|
 | `enrich` | pure | Write `this.objects` / `this.data` / `logging_context`. |
 | `route` | pure | Routing-only node (no body work; just sets `next_task`). |
-| `split` (`add_items`) | pure | Create child items from a selector; optionally route + run them (parallel). |
+| `split` (`add_items`) | pure | Create child items from a selector; optionally route + run them (parallel). Type and route may vary per child (§19 E1). |
 | `aggregate` (`join`) | pure | General wait-then-reduce over a selected item set (§7). |
+| `dispatch` | pure | Re-activate a selected item set onto a computed node — the inverse of `aggregate` (§19 E4). |
 | `call` | **effect** | Invoke `http` / `sub_workflow` / `js`; capture result. |
 | `return` | terminal | Emit workflow `result` or `error` and end the branch. |
 
@@ -308,6 +331,12 @@ child item's `data`. `parallel` runs the produced items concurrently (§8).
 ### 6.4 `aggregate` / `join`
 
 See §7.
+
+### 6.4a `dispatch`
+
+See §19 E4. `aggregate` reads a selected set and folds it into `this`;
+`dispatch` selects a set and sets each member's `next_task`. Together they are
+how a parent drives its children through a second phase.
 
 ### 6.5 `call`
 
@@ -552,12 +581,16 @@ Carried over from the reference engine; applies to effect tasks (§9).
      a. Runnable set = items whose next_task node's `condition` passes AND,
         if the node has a gate `select`/`until`, whose `until` holds over `select`.
      b. Pick runnable items (any order — outcome is scheduling-independent):
-          - run body (enrich | route | split | aggregate | call | return)
-          - capture effect result/error into tasks[name]
+          - run body (enrich | route | split | aggregate | dispatch | call | return)
+          - capture effect result/error into tasks[name]; append to trajectory (§19 E2)
           - run target_state_setter → item.target_state
           - run route → item.next_task (null ends the branch)
      c. `async` nodes / `parallel` splits spawn isolated branches (§8).
      d. Gated nodes with unmet `until` stay Waiting (do not busy-loop).
+     e. A `dispatch` body may return ended items to the runnable set (§19 E4).
+     f. If no item is runnable, none is in flight, and items remain with a
+        non-null next_task, the evaluation is deadlocked — report the blocked
+        items and the gate that blocked each (§19 Interpretations).
 3. Default "Output" node maps root.target_state → result | error via the terminal
    `return` nodes.
 ```
@@ -597,7 +630,9 @@ Top-level shape (canonical machine form; equivalent of `generated.json`):
       "task": {
         "route": { "switch": { "$expr": "target_state" } },
         "default_error_handler": { "item": "common", "$do": "objects.tech_errors.push({ detail: error.message, type: 'https://…/order/common/internal' })" }
-      }
+      },
+      "concurrency": { "max_parallel": 8 },   // §19 E5
+      "entry": "Input"                         // §19 E5 — node the root item starts on
     }
   },
 
@@ -835,22 +870,31 @@ The full schema is delivered as `aflow.schema.json`. Skeleton:
         // exactly one body kind:
         "enrich":    { "type": "object", "properties": { "$do": { "type": "string" } } },
         "split":     { "type": "object", "required": ["itemType", "selector"],
-                       "properties": { "itemType": { "type": "string" }, "selector": { "$ref": "#/$defs/expr" },
-                                       "route": { "type": ["string", "null"] }, "parallel": { "type": "boolean" } } },
+                       // E1: itemType and route are per-child, so both accept an expression.
+                       "properties": { "itemType": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/expr" } ] },
+                                       "selector": { "$ref": "#/$defs/expr" },
+                                       "route": { "$ref": "#/$defs/route" }, "parallel": { "type": "boolean" } } },
         "aggregate": { "$ref": "#/$defs/gate" },
+        "dispatch":  { "type": "object", "required": ["select", "route"],       // E4
+                       "properties": { "select": { "$ref": "#/$defs/expr" },
+                                       "route":  { "$ref": "#/$defs/route" } } },
         "call":      { "$ref": "#/$defs/call" },
         "return":    { "type": "object",
                        "properties": { "result": { "$ref": "#/$defs/expr" }, "error": { "$ref": "#/$defs/expr" } } }
       },
-      // A node carries AT MOST ONE body kind (enrich|split|aggregate|call|return).
+      // A node carries AT MOST ONE body kind
+      // (enrich|split|aggregate|dispatch|call|return).
       // A routing-only node omits the body entirely and carries just `route`.
       "allOf": [
         { "not": { "anyOf": [
-          { "required": ["enrich", "split"] },   { "required": ["enrich", "aggregate"] },
-          { "required": ["enrich", "call"] },    { "required": ["enrich", "return"] },
-          { "required": ["split", "aggregate"] },{ "required": ["split", "call"] },
-          { "required": ["split", "return"] },   { "required": ["aggregate", "call"] },
-          { "required": ["aggregate", "return"] },{ "required": ["call", "return"] }
+          { "required": ["enrich", "split"] },     { "required": ["enrich", "aggregate"] },
+          { "required": ["enrich", "dispatch"] },  { "required": ["enrich", "call"] },
+          { "required": ["enrich", "return"] },    { "required": ["split", "aggregate"] },
+          { "required": ["split", "dispatch"] },   { "required": ["split", "call"] },
+          { "required": ["split", "return"] },     { "required": ["aggregate", "dispatch"] },
+          { "required": ["aggregate", "call"] },   { "required": ["aggregate", "return"] },
+          { "required": ["dispatch", "call"] },    { "required": ["dispatch", "return"] },
+          { "required": ["call", "return"] }
         ] } }
       ]
     },
@@ -968,3 +1012,177 @@ interchangeable; JSON is what the engine loads and the schema (§16) validates.
 | **Expression (`$expr`/`$do`)** | Pure JavaScript evaluated against the item tree; no I/O. |
 | **Bundle / artifactory** | Library source for inline-JS effects — packed with the workflow or resolved from an external registry. |
 ```
+
+---
+
+## 19. Engine extensions (E1–E5)
+
+Five additions to §16, and three readings of under-specified behaviour, arrived
+at while building the evaluation engine (§1 artifact 4). Each addition lands on
+one side of the §5 determinism boundary — all five are pure — and none
+introduces a third flavour of embedded code.
+
+### E1 — `split` chooses each child's type and route
+
+`split.itemType` and `split.route` were single static strings, so one `split`
+produced one item type on one path. Both now accept an expression, evaluated
+**once per produced child** with `this` bound to that child:
+
+```jsonc
+{ "name": "split_order_lines", "item": "order",
+  "split": {
+    "itemType": { "$expr": "data.product_type === 'hotel' ? 'hotel_line' : 'flight_line'" },
+    "selector": { "$expr": "data.order_lines" },
+    "route":    { "$expr": "type === 'hotel_line' ? 'create_hotel_record' : 'book_flight'" },
+    "parallel": true
+  },
+  "route": "await_reservations" }
+```
+
+`split.route` takes the full `route` shape of §16 — a name, a `$expr`, or
+`switch`/`cases` — so a child can be routed on its own `data` without a
+router node standing in the way.
+
+While evaluating `itemType` the child does not exist yet, so the scope is
+narrowed to `data` (the selector element), `index` (its position, which is
+deterministic because the selector is pure), `parent`, `root`, `parameters` and
+`ctx`. `route` is evaluated afterwards, against the real child.
+
+Without E1 this is expressible only by splitting into one type and immediately
+routing through a dispatcher node; item types then cannot differ per child at
+all.
+
+### E2 — the trajectory is ordered and append-only
+
+`tasks` is keyed by node name, so it holds one record per node. Two things get
+lost: the order of visits, and every visit but the last. Both matter to the
+engine's own contract — §11 retries and E4's second phase both revisit a node.
+
+Each item therefore carries `trajectory`, an append-only array (§3), and each
+`tasks[name]` record carries `attempts`. One entry per visit:
+
+```jsonc
+{ "seq": 3, "item_id": "1.1", "item_type": "hotel_line",
+  "task": "commit_hotel_booking", "attempt": 1, "status": "success",
+  "started": "…", "updated": "…",
+  "target_state": "success", "next_task": "mark_hotel_settled",
+  "result": { "confirmation": "HTL-…" }, "error": null }
+```
+
+`seq` numbers the visits **of one item**, which is scheduling-independent: an
+item has one `next_task`, so its visits are strictly sequential. The engine also
+keeps a flat cross-item log in completion order, surfaced as
+`Evaluation.trajectory` for diagnostics. That log is scheduling-*dependent* and
+is therefore deliberately unreachable from expressions — see E3.
+
+### E3 — `ctx`: the evaluation context, order-free
+
+Expressions could reach `this`, `parent`, `items` and `root`, which is the item's
+own neighbourhood. Routing decisions that depend on the wider evaluation — what
+another subtree decided, whether some node ran anywhere, how many items exist —
+had nowhere to read from. `ctx` is bound in every pure expression:
+
+| Member | Meaning |
+|---|---|
+| `ctx.workflow` | `{ client_id, name, version }` |
+| `ctx.parameters` | the workflow's parameters |
+| `ctx.items` | every item in the evaluation, flat, in **creation** order |
+| `ctx.item(id)` | one item by id |
+| `ctx.byType(type)` | items of an item type |
+| `ctx.byTask(task)` | items that have visited a node |
+| `ctx.visits(task)` | every recorded visit of a node, ordered by (item creation, `seq`) |
+| `ctx.trajectory(id?)` | one item's ordered visits, or a per-item map |
+| `ctx.count(type?)` | item count |
+
+**`ctx` is order-free by construction, and that is normative.** §8 forbids an
+expression depending on arrival order, so `ctx` exposes no accessor returning a
+global chronological log. The two orderings it does expose are both pure
+functions of the specification and the recorded effect results:
+
+- *creation order*, which follows the `split` selectors — themselves pure;
+- *per-item `seq`*, which follows one item's strictly sequential trajectory.
+
+An engine MUST NOT add a cross-item chronological accessor to `ctx`. The flat
+log of E2 stays on the response, outside expression scope.
+
+### E4 — `dispatch`: re-activating a set of items
+
+§17's `change_rollback_router` sits on the parent and routes to
+`rollback_changes` after its children have reached `next_task === null`. Nothing
+in §3–§12 says how those children resume: `null` ends a branch, and no
+construct sets another item's `next_task`.
+
+`aggregate` selects a set and folds it into `this`. `dispatch` is its inverse —
+it selects a set and gives each member a `next_task`:
+
+```jsonc
+{ "name": "commit_or_rollback", "item": "order",
+  "dispatch": {
+    "select": { "$expr": "items" },
+    "route":  { "$expr": "root.objects.all_reserved ? 'commit_hotel_booking' : 'release_hotel_hold'" }
+  },
+  "route": "await_settlement" }
+```
+
+`route` is evaluated once per selected item with `this` bound to that item, so
+one dispatch fans a heterogeneous set onto different nodes. It is pure: it
+writes `next_task`, nothing else. Its task record lists what it dispatched, and
+each re-activated item records its own subsequent visits (E2).
+
+Rules:
+
+- Dispatching an item that is **mid-visit** is an error — `dispatch` re-activates
+  branches that have ended, it does not preempt running ones.
+- A `null` route leaves the branch ended, so `dispatch` can also be a no-op for
+  part of the set.
+- Because the re-activated items run their own trajectories, a parent that
+  dispatches normally follows it with a second `aggregate` barrier. The two
+  barriers need distinguishable `until` conditions; the natural form is a
+  monotonically advancing marker in `objects` (`reserved` → `settled`), which
+  satisfies §7's monotonicity requirement.
+
+Without E4 the same flow is expressible child-side — each child holds its own
+`aggregate` gate over `root.items` and decides for itself — but the
+parent-driven form the specification's own example uses is not.
+
+### E5 — bounded concurrency and an explicit entry node
+
+```jsonc
+"config": { "defaults": {
+  "concurrency": { "max_parallel": 8 },
+  "entry": "Input"
+} }
+```
+
+`max_parallel` caps simultaneously-running `call` bodies. It is a resource
+control only: §8 guarantees the outcome does not depend on scheduling, so
+changing the cap MUST NOT change the result. `entry` names the node the root
+item starts on, defaulting to `Input` and then to the first node bound to the
+root item type.
+
+### Interpretations of under-specified behaviour
+
+**A gate that never opens is a deadlock, not a skip.** §12 step 2a puts
+`condition` in the same position as `until`, so a false `condition` **blocks**
+the item rather than skipping the node. When no item can progress and the
+evaluation is not terminal, the engine reports which items are blocked, on which
+node, and whether it was `condition` or `until` — it does not spin and does not
+silently drop the branch. Authors who want "skip this node" should write it as
+routing, not as a condition.
+
+**`async: true` routes before it runs.** §8 says the flow "continues past this
+node without waiting", and the sequence diagram has the main branch reach an
+`await:[…]` node while the branch is still in flight. For that to hold, the
+node's `state` and `route` phases run on the pre-body item and the body becomes
+a detached branch, which writes `tasks[name]` — `pending` at spawn, then the
+settled record — and appends both to the trajectory. `await: ["NodeName"]` is
+sugar for a gate that blocks until every named branch on this item has settled.
+
+**§8 rule 1 is enforced at runtime.** Two concurrently live branches assigning
+the same top-level `objects` key on the same item raises an error naming the
+item, the path and the second writer. Attribution is per-write, at top-level-key
+granularity; deep aliasing between branches (`objects.a.b`) is out of scope.
+
+**Termination without a `return` node.** If no `return` body ran, the default
+`Output` node maps the root's `target_state`: `failure` yields a declared error,
+anything else yields `root.objects.result`.
