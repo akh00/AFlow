@@ -4,7 +4,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,7 +141,11 @@ export default wf.assemble(g);
     });
     const r = buildWorkflow(join(dir, "entry.ts"));
     expect(r.definition).toBeNull();
-    expect(r.diagnostics.map((d) => [d.rule, d.file])).toEqual([["schema", join(dir, "header.ts")]]);
+    // The typings come from the schemas, so the unknown key is also a TypeScript error, as in the editor.
+    expect(r.diagnostics.map((d) => [d.rule, d.file])).toEqual([
+      ["schema", join(dir, "header.ts")],
+      ["type-error", join(dir, "header.ts")],
+    ]);
     expect(r.diagnostics[0]!.message).toContain("acme.Missing");
   });
 
@@ -330,5 +334,82 @@ export default wf.assemble(g);
     const r = run("frobnicate");
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("usage");
+  });
+});
+
+describe("buildWorkflow — the schema typings come from the schemas, not from .aflow/types (§15.7, §15.8)", () => {
+  /** A copy of the booking fixture under `tmp`, without `.aflow`, with a tsconfig that resolves the packages. */
+  function bookingCopy(name: string): string {
+    const dir = project(name, {});
+    cpSync(booking, dir, { recursive: true, filter: (src) => !src.includes(".aflow") && !src.endsWith("tsconfig.json") });
+    return dir;
+  }
+
+  it("builds a fresh copy that has no .aflow directory", () => {
+    const dir = bookingCopy("fresh");
+    const r = buildWorkflow(join(dir, "book_travel_order.ts"));
+    expect(r.diagnostics).toEqual([]);
+    expect(normalise(r.definition)).toEqual(normalise(bookingWorkflow));
+  });
+
+  it("fails on stale typings: a schema member type that the DSL reads changed after `aflow types`", () => {
+    const dir = bookingCopy("stale");
+    expect(generateTypes(join(dir, "tsconfig.json")).diagnostics).toEqual([]);
+    const schemaFile = join(dir, "schemas", "travelco.json");
+    const schema = JSON.parse(readFileSync(schemaFile, "utf8"));
+    schema.definitions.PaymentInstrument.properties.token = { type: "number" };
+    writeFileSync(schemaFile, JSON.stringify(schema, null, 2));
+    const r = buildWorkflow(join(dir, "book_travel_order.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.map((d) => [d.rule, d.file])).toEqual([["type-error", join(dir, "order.ts")]]);
+    expect(r.diagnostics[0]!.message).toContain("slice");
+  });
+
+  it("builds without a tsconfig", () => {
+    // An installed layout: the packages are in node_modules, and no tsconfig.json is on the path.
+    const dir = join(tmp, "no-tsconfig");
+    const install = (from: string, name: string) => {
+      const to = join(dir, "node_modules", "@aflow", name);
+      cpSync(join(from, "package.json"), join(to, "package.json"));
+      cpSync(join(from, "src"), join(to, "src"), { recursive: true });
+    };
+    install(join(repo, "packages", "dsl"), "dsl");
+    install(repo, "engine");
+    writeFileSync(
+      join(dir, "acme.json"),
+      JSON.stringify({ definitions: { In: { type: "object", required: ["a"], properties: { a: { type: "string" } } }, Out: { type: "object" } } }),
+    );
+    writeFileSync(join(dir, "header.ts"), HEADER);
+    writeFileSync(
+      join(dir, "entry.ts"),
+      `import { wf } from "./header";
+const g = wf.tasks({
+  Input: { item: "order", enrich: ({ data, logging_context }) => { logging_context.n = data.a.length; }, route: null },
+});
+export default wf.assemble(g);
+`,
+    );
+    expect(ts.findConfigFile(dir, ts.sys.fileExists)).toBeUndefined();
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.diagnostics).toEqual([]);
+    expect(r.definition).not.toBeNull();
+  });
+});
+
+describe("buildWorkflow — header misuse in the workflow's own files (R28)", () => {
+  it("reports a workflow() call that is not top level in the entry file, as the editor does", () => {
+    const dir = project("stray-own", {
+      "header.ts": HEADER,
+      "acme.json": SCHEMA,
+      "entry.ts": `import { workflow } from "@aflow/dsl";
+import { wf } from "./header";
+export const make = () => workflow({ client_id: "acme", name: "other", input: "acme.In", result: "acme.Out", items: {} });
+const g = wf.tasks({ Input: { item: "order", route: null } });
+export default wf.assemble(g);
+`,
+    });
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.map((d) => [d.rule, d.file])).toEqual([["not-static", join(dir, "entry.ts")]]);
   });
 });

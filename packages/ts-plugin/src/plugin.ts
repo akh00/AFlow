@@ -27,14 +27,6 @@ import { contentEnd, namePositionAt } from "./names.js";
 
 type Ts = typeof TS;
 
-/** The files that hold a workflow. These are the header, the entry and the files of its tasks. */
-function filesOf(wf: WorkflowAnalysis): Set<string> {
-  const files = new Set([wf.headerFile]);
-  if (wf.entryFile) files.add(wf.entryFile);
-  for (const loc of Object.values(wf.locations.tasks)) files.add(loc.file);
-  return files;
-}
-
 /**
  * A value that changes when a registry input of the header changes. The inputs
  * are the schema file mtimes, the inline types, the names and the existence of
@@ -139,7 +131,8 @@ export function init(modules: { typescript: Ts }): TS.server.PluginModule {
         const analysis = analysisOf(program);
         const own = analysis.diagnostics.filter((d) => d.file === sf.fileName);
         for (const wf of analysis.workflows) {
-          if (!filesOf(wf).has(sf.fileName)) continue;
+          // R28: the files of the workflow are the files that `aflow build` checks.
+          if (!wf.files.includes(sf.fileName)) continue;
           const inputs = registryInputs(wf);
           own.push(...refreshRegistry(program, wf, inputs), ...closureErrors(program, wf, inputs));
         }

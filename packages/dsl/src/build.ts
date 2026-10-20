@@ -15,7 +15,7 @@ import ts from "typescript";
 
 import { type AflowDiagnostic, sortedUnique } from "./analyzer/diagnostics.js";
 import { analyzeProgram, type SourceLocations, type WorkflowAnalysis } from "./analyzer/index.js";
-import { schemaClosure, writeRegistryFor } from "./registry.js";
+import { registryFor, schemaClosure, writeRegistryFor } from "./registry.js";
 
 export { writeRegistryFor };
 
@@ -73,7 +73,7 @@ function parseConfig(configPath: string, diagnostics: AflowDiagnostic[]): ts.Par
 
 /**
  * The TypeScript errors of the workflow's own files (header, groups, entry) as
- * `type-error` diagnostics (R27). Library and declaration files are not checked.
+ * `type-error` diagnostics (R27). It does not check library and declaration files.
  */
 function typeErrors(program: ts.Program, wf: WorkflowAnalysis): AflowDiagnostic[] {
   const out: AflowDiagnostic[] = [];
@@ -96,9 +96,42 @@ function typeErrors(program: ts.Program, wf: WorkflowAnalysis): AflowDiagnostic[
 }
 
 /**
+ * A program with the `SchemaRegistry` typings of the workflow from
+ * `registry`, not from the disk (§15.7). The registry file is always a root,
+ * so the build needs no `.aflow/types` file and no `include` for it. The
+ * other source files come from `old`, so the build does not parse them again.
+ */
+function withRegistry(
+  old: ts.Program,
+  rootNames: readonly string[],
+  options: ts.CompilerOptions,
+  registry: { path: string; text: string },
+): ts.Program {
+  const target = resolve(registry.path);
+  const isRegistry = (f: string) => resolve(f) === target;
+  const host = ts.createCompilerHost(options, true);
+  const { fileExists, readFile, getSourceFile } = host;
+  host.fileExists = (f) => isRegistry(f) || fileExists(f);
+  host.readFile = (f) => (isRegistry(f) ? registry.text : readFile(f));
+  host.getSourceFile = (f, languageVersion, onError, shouldCreate) =>
+    isRegistry(f)
+      ? ts.createSourceFile(f, registry.text, languageVersion, true)
+      : (old.getSourceFile(f) ?? getSourceFile(f, languageVersion, onError, shouldCreate));
+  return ts.createProgram({
+    rootNames: [...rootNames.filter((f) => !isRegistry(f)), target],
+    options,
+    host,
+    oldProgram: old,
+  });
+}
+
+/**
  * Builds the workflow assembled in `entry` (§15.8). The program holds
- * `entry` and the files of `opts.tsconfig` or of the nearest `tsconfig.json`
- * (with the generated `.aflow/types`), with that file's compiler options.
+ * `entry` and the files of `opts.tsconfig` or of the nearest `tsconfig.json`,
+ * with the compiler options of that file. With no `tsconfig.json`, it uses
+ * `DEFAULT_OPTIONS`. The program also holds the `SchemaRegistry` typings of
+ * the workflow, made from its schemas at each build. It does not read them
+ * from `.aflow/types`, so it does not need `aflow types` first (§15.7).
  */
 export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): BuildResult {
   const file = resolve(entry);
@@ -111,11 +144,21 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
 
   const configPath = opts.tsconfig ? resolve(opts.tsconfig) : ts.findConfigFile(dirname(file), ts.sys.fileExists);
   const parsed = configPath ? parseConfig(configPath, diagnostics) : null;
-  const program = ts.createProgram({
-    rootNames: [file, ...(parsed?.fileNames ?? [])],
-    options: parsed?.options ?? DEFAULT_OPTIONS,
-  });
-  const wf = analyzeProgram(ts, program).workflows.find((w) => w.entryFile !== null && resolve(w.entryFile) === file);
+  const rootNames = [file, ...(parsed?.fileNames ?? [])];
+  const options = parsed?.options ?? DEFAULT_OPTIONS;
+  const assembledIn = (program: ts.Program) =>
+    analyzeProgram(ts, program).workflows.find((w) => w.entryFile !== null && resolve(w.entryFile) === file);
+
+  // The first analysis finds the header. Its schemas give the typings, and the
+  // build then analyses and type-checks again with those typings (§15.7).
+  const first = ts.createProgram({ rootNames, options });
+  let program = first;
+  let wf = assembledIn(first);
+  const registry = wf && registryFor(ts, first, wf);
+  if (registry) {
+    program = withRegistry(first, rootNames, options, registry);
+    wf = assembledIn(program);
+  }
   if (!wf) {
     diagnostics.push(
       fileDiagnostic(
@@ -147,7 +190,7 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
 
 /**
  * Regenerates the `SchemaRegistry` typings of every workflow header in the
- * `project` tsconfig (§15.7). A file is written only when its content changes.
+ * `project` tsconfig (§15.7). It writes a file only when the content changes.
  */
 export function generateTypes(project: string): { written: string[]; diagnostics: AflowDiagnostic[] } {
   const configPath = resolve(project);

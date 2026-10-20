@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RULE_CODES } from "@aflow/dsl";
+import { buildWorkflow } from "@aflow/dsl/build";
 import ts from "typescript";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -287,5 +288,54 @@ describe("schema typings regeneration (§15.7, §15.9 item 1)", () => {
     expect(aflowDiagnostics(s, "order.ts")).toEqual([]);
     expect(readFileSync(registryFile, "utf8")).toContain("loyalty_id");
     expect(dataDot()).toContain("loyalty_id");
+  });
+});
+
+describe("the editor and `aflow build` agree (§15.4, §15.8)", () => {
+  const RULE_OF = new Map(Object.entries(RULE_CODES).map(([rule, code]) => [code, rule]));
+
+  /** The mutations of the tests above, and more. Each is `[label, file, from, to, an error rule it gives]`. */
+  const MUTATIONS: [string, string, string, string, string | null][] = [
+    ["no mutation", "hotel.ts", "", "", null],
+    ["unknown route", "hotel.ts", 'route: "mark_hotel_settled"', 'route: "mark_hotel_setled"', "unknown-task"],
+    ["Date.now()", "hotel.ts", "objects.phase = 'settled'", "objects.phase = Date.now() > 0 ? 'settled' : 'settled'", "forbidden-global"],
+    ["unreachable task", "hotel.ts", 'route: "mark_hotel_settled"', "route: null", null],
+    ["unknown schema key", "header.ts", 'result: "travelco.BookingResponse"', 'result: "travelco.Nope"', "schema"],
+    ["type error", "order.ts", "logging_context.order_id = data.order_id;", "logging_context.order_id = data.order_id.toFixed();", "type-error"],
+    ["multiple bodies", "order.ts", 'route: "split_order_lines",', 'split: { selector: ({ data }) => data.order_lines, item_type: "hotel_line" },\n    route: "split_order_lines",', "multiple-bodies"],
+    ["this in a nested function", "order.ts", "logging_context.order_id = data.order_id;", "logging_context.order_id = [data].map(function (this: any) { return this.x; })[0];", "this"],
+    ["scope rebind", "order.ts", "logging_context.order_id = data.order_id;", "logging_context = {};", "scope-rebind"],
+    ["workflow() not at top level", "order.ts", 'import { wf } from "./header";', 'import { wf } from "./header";\nimport { workflow } from "@aflow/dsl";\nexport const make = () => workflow({ client_id: "x", name: "y", input: "travelco.BookingRequest", result: "travelco.BookingResponse", items: {} });', "not-static"],
+  ];
+
+  it.each(MUTATIONS)("%s: the same error rules in the same files", (_label, file, from, to, rule) => {
+    const s = session();
+    const full = s.path(file);
+    const text = readFileSync(full, "utf8");
+    expect(text, `${file} holds ${from}`).toContain(from);
+    writeFileSync(full, text.replace(from, to));
+    writeFileSync(
+      s.path("tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { ...options, target: "ES2022", lib: ["es2023"], module: "ESNext", moduleResolution: "bundler" },
+        include: ["*.ts", ".aflow/types/*.d.ts"],
+      }),
+    );
+
+    const key = (f: string, rule: string) => `${f.slice(s.dir.length + 1)} ${rule}`;
+    const editor = new Set<string>();
+    for (const f of FILES) {
+      const path = s.path(f);
+      for (const d of [...s.ls.getSyntacticDiagnostics(path), ...s.ls.getSemanticDiagnostics(path)]) {
+        if (d.category !== ts.DiagnosticCategory.Error) continue;
+        editor.add(key(path, d.source === "aflow" ? RULE_OF.get(d.code)! : "type-error"));
+      }
+    }
+    const built = buildWorkflow(s.path("book_travel_order.ts"));
+    const build = new Set(built.diagnostics.filter((d) => d.severity === "error").map((d) => key(d.file, d.rule)));
+
+    if (rule) expect([...editor]).toContain(`${file} ${rule}`);
+    expect([...build].sort()).toEqual([...editor].sort());
+    expect(built.definition === null).toBe(editor.size > 0);
   });
 });

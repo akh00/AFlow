@@ -2,7 +2,8 @@
  * The schemas of one workflow header (spec §10, §15.7, §15.8).
  *
  * `aflow types` and the editor plugin both write the registry through
- * `writeRegistryFor`. `aflow build` and the plugin both check the schema
+ * `writeRegistryFor`. `aflow build` type-checks against the same text, from
+ * `registryFor`, without a write. `aflow build` and the plugin both check the schema
  * closure through `schemaClosure`, so the two report the same errors.
  * The caller gives `ts`, and this module does not import it. The plugin gives
  * the instance of tsserver, so this module loads no second TypeScript.
@@ -115,8 +116,25 @@ function writeIfChanged(path: string, text: string): boolean {
 }
 
 /**
+ * The `SchemaRegistry` typings of the header of `wf` (§15.7): the registry
+ * file path and its text. Schema load problems are `schema` diagnostics at the
+ * header. The result is `null` when the header has no literal `client_id` and
+ * `name`. This function writes no file.
+ */
+export function registryFor(
+  ts: typeof TS,
+  program: TS.Program,
+  wf: WorkflowAnalysis,
+): { path: string; text: string; diagnostics: AflowDiagnostic[] } | null {
+  const path = registryPath(wf);
+  if (!path) return null;
+  const set = loadSchemas(schemaSources(wf));
+  return { path, text: generateRegistry(set), diagnostics: schemaDiagnostics(ts, program, wf, set.errors) };
+}
+
+/**
  * Regenerates the `SchemaRegistry` typings of the header of `wf` (§15.7).
- * The file is written only when its content changes. `written` is the path
+ * It writes the file only when the content changes. `written` is the path
  * when it wrote, else `null`. Schema problems are `schema` diagnostics at the
  * header. This function does not throw on them.
  */
@@ -125,12 +143,11 @@ export function writeRegistryFor(
   program: TS.Program,
   wf: WorkflowAnalysis,
 ): { written: string | null; diagnostics: AflowDiagnostic[] } {
-  const path = registryPath(wf);
-  if (!path) return { written: null, diagnostics: [] };
-  const set = loadSchemas(schemaSources(wf));
-  const diagnostics = schemaDiagnostics(ts, program, wf, set.errors);
+  const registry = registryFor(ts, program, wf);
+  if (!registry) return { written: null, diagnostics: [] };
+  const { path, text, diagnostics } = registry;
   try {
-    return { written: writeIfChanged(path, generateRegistry(set)) ? path : null, diagnostics };
+    return { written: writeIfChanged(path, text) ? path : null, diagnostics };
   } catch (e) {
     const error: SchemaError = { kind: "unreadable", message: `cannot write ${path}: ${(e as Error).message}` };
     return { written: null, diagnostics: [...diagnostics, ...schemaDiagnostics(ts, program, wf, [error])] };
