@@ -1,0 +1,5 @@
+{
+  "$defs": {
+    "PingB": { "properties": { "a": { "$ref": "./common.json#/$defs/PingA" } } }
+  }
+}

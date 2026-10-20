@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Money": { "type": "object", "properties": { "currency": { "type": "string" } } },
+    "PingA": { "properties": { "b": { "$ref": "./other.json#/$defs/PingB" } } }
+  }
+}

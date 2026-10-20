@@ -1,0 +1,5 @@
+{
+  "title": "Priced",
+  "type": "object",
+  "properties": { "price": { "$ref": "./common.json#/$defs/Money" } }
+}

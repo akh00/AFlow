@@ -1,0 +1,1 @@
+{ "definitions": { "R": { "$ref": "https://example.com/x.json#/definitions/Y" } } }
