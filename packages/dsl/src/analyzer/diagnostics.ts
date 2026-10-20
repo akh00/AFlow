@@ -26,6 +26,7 @@ const RULES = [
   "body-form",
   "no-entry",
   "project-config",
+  "type-error",
 ] as const;
 
 export type RuleId = (typeof RULES)[number];

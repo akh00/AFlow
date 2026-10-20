@@ -251,6 +251,22 @@ describe("failure isolation (Review Focus 5)", () => {
 });
 
 describe("schema typings regeneration (§15.7, §15.9 item 1)", () => {
+  it("reports a schema key that no schema defines, as `aflow build` does (§15.8)", () => {
+    const s = session();
+    s.edit("header.ts", 'result: "travelco.BookingResponse"', 'result: "travelco.Nope"');
+    const found = aflowDiagnostics(s, "header.ts");
+    expect(found.map((d) => d.code)).toEqual([RULE_CODES.schema]);
+    expect(ts.flattenDiagnosticMessageText(found[0]!.messageText, "\n")).toContain("travelco.Nope");
+  });
+
+  it("writes a deleted registry again", () => {
+    const s = session();
+    expect(aflowDiagnostics(s, "header.ts")).toEqual([]);
+    rmSync(s.path(REGISTRY));
+    expect(aflowDiagnostics(s, "header.ts")).toEqual([]);
+    expect(existsSync(s.path(REGISTRY))).toBe(true);
+  });
+
   it("rewrites the registry when a schema file changes, and the new field completes", () => {
     const s = session();
     const registryFile = s.path(REGISTRY);

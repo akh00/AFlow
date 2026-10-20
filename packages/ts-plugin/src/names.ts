@@ -1,7 +1,7 @@
 /**
- * Name positions of the DSL (spec §15.9 item 2): which names a string literal
- * takes, found from the property path between the literal and the
- * `workflow({…})` or `X.tasks({…})` call that holds it.
+ * Name positions of the DSL (spec §15.9 item 2). This module finds the names
+ * that a string literal takes. It uses the property path between the literal
+ * and the `workflow({…})` or `X.tasks({…})` call that holds it.
  */
 
 import type { Analysis, WorkflowAnalysis } from "@aflow/dsl";
@@ -32,7 +32,7 @@ function stringLiteralAt(ts: Ts, sf: TS.SourceFile, pos: number) {
   return found;
 }
 
-/** The offset after the last character of the literal's text: before the closing quote, if there is one. */
+/** The offset after the last character of the literal text. If there is a closing quote, the offset is before it. */
 export function contentEnd(sf: TS.SourceFile, lit: TS.StringLiteral | TS.NoSubstitutionTemplateLiteral): number {
   const start = lit.getStart(sf);
   const quote = sf.text[start];
@@ -48,8 +48,8 @@ function propertyName(ts: Ts, name: TS.PropertyName): string | undefined {
 /**
  * The call whose object-literal argument holds `lit`, and the property path
  * from that argument down to `lit`. The value MAY be the result of an arrow at
- * that path (`route: ({ type }) => type === … ? "a" : "b"`); it may not be an
- * operand, so a comparison string is not a name position.
+ * that path (`route: ({ type }) => type === … ? "a" : "b"`). The value cannot be
+ * an operand, so a comparison string is not a name position.
  */
 function pathTo(ts: Ts, lit: TS.Node): { call: TS.CallExpression; path: string[] } | undefined {
   const path: string[] = [];
@@ -76,7 +76,7 @@ function pathTo(ts: Ts, lit: TS.Node): { call: TS.CallExpression; path: string[]
   }
 }
 
-/** True for `[]`, `["cases", <state>]` and `["default"]`: the targets inside one route value (§13). */
+/** True for `[]`, `["cases", <state>]` and `["default"]`. These are the targets inside one route value (§13). */
 const routeTail = (rest: string[]) =>
   rest.length === 0 || (rest.length === 2 && rest[0] === "cases") || (rest.length === 1 && rest[0] === "default");
 
@@ -123,9 +123,9 @@ function namesOf(kind: "task" | "item", workflows: WorkflowAnalysis[]): string[]
 }
 
 /**
- * The names the string literal at `pos` takes: every task of the workflow
- * (from all its groups and files) at a route target, the declared item types
- * at `item`, `split.item_type` and `items.*.parent`. `undefined` elsewhere.
+ * The names that the string literal at `pos` takes. A route target takes every
+ * task of the workflow, from all its groups and files. `item`, `split.item_type`
+ * and `items.*.parent` take the declared item types. Other positions give `undefined`.
  */
 export function namePositionAt(
   ts: Ts,

@@ -145,6 +145,33 @@ export default wf.assemble(g);
     expect(r.diagnostics[0]!.message).toContain("acme.Missing");
   });
 
+  it("reports TypeScript errors in the workflow's files as type-error, and does not build (R27)", () => {
+    const dir = project("type-error", {
+      "header.ts": HEADER,
+      "acme.json": JSON.stringify({
+        definitions: {
+          In: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false },
+          Out: { type: "object" },
+        },
+      }),
+      "group.ts": `import { wf } from "./header";
+export const g = wf.tasks({
+  Input: { item: "order", enrich: ({ data, logging_context }) => { logging_context.n = data.nope }, route: null },
+});
+`,
+      "entry.ts": `import { wf } from "./header";
+import { g } from "./group";
+export default wf.assemble(g);
+`,
+    });
+    expect(generateTypes(join(dir, "tsconfig.json")).diagnostics).toEqual([]);
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.map((d) => [d.rule, d.severity, d.file])).toEqual([["type-error", "error", join(dir, "group.ts")]]);
+    expect(r.diagnostics[0]!.message).toContain("nope");
+    expect(r.diagnostics[0]!.start).toBe(readFileSync(join(dir, "group.ts"), "utf8").indexOf("nope"));
+  });
+
   it("merges the schema closure into definitions", () => {
     const dir = project("tiny", {
       "header.ts": HEADER,

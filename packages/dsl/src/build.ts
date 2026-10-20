@@ -15,8 +15,7 @@ import ts from "typescript";
 
 import { type AflowDiagnostic, sortedUnique } from "./analyzer/diagnostics.js";
 import { analyzeProgram, type SourceLocations, type WorkflowAnalysis } from "./analyzer/index.js";
-import { schemaDiagnostics, schemaSources, writeRegistryFor } from "./registry.js";
-import { closure, loadSchemas } from "./schema/load.js";
+import { schemaClosure, writeRegistryFor } from "./registry.js";
 
 export { writeRegistryFor };
 
@@ -72,29 +71,36 @@ function parseConfig(configPath: string, diagnostics: AflowDiagnostic[]): ts.Par
   return parsed;
 }
 
-/** The schema keys the document names: `input`, `result`, item types, `call.output` types (§10). */
-function schemaRoots(wf: WorkflowAnalysis): string[] {
-  const roots = new Set<string>();
-  const add = (k: unknown) => {
-    if (typeof k === "string") roots.add(k);
-  };
-  add(wf.header.input);
-  add(wf.header.result);
-  for (const decl of Object.values(wf.header.items ?? {})) {
-    if (decl?.data !== "input") add(decl?.data);
-    add(decl?.objects);
+/**
+ * The TypeScript errors of the workflow's own files (header, groups, entry) as
+ * `type-error` diagnostics (R27). Library and declaration files are not checked.
+ */
+function typeErrors(program: ts.Program, wf: WorkflowAnalysis): AflowDiagnostic[] {
+  const files = new Set([wf.headerFile, ...Object.values(wf.locations.tasks).map((l) => l.file)]);
+  if (wf.entryFile) files.add(wf.entryFile);
+  const out: AflowDiagnostic[] = [];
+  for (const name of files) {
+    const sf = program.getSourceFile(name);
+    if (!sf || sf.isDeclarationFile) continue;
+    for (const d of [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)]) {
+      if (d.category !== ts.DiagnosticCategory.Error && d.category !== ts.DiagnosticCategory.Warning) continue;
+      out.push({
+        rule: "type-error",
+        severity: "error",
+        message: `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`,
+        file: sf.fileName,
+        start: d.start ?? 0,
+        length: d.length ?? 0,
+      });
+    }
   }
-  for (const task of wf.definition.tasks) {
-    add(task.call?.output?.result_type);
-    add(task.call?.output?.error_type);
-  }
-  return [...roots];
+  return out;
 }
 
 /**
- * Builds the workflow assembled in `entry` (§15.8). The program is rooted at
- * `entry`, with the compiler options of `opts.tsconfig` or of the nearest
- * `tsconfig.json`.
+ * Builds the workflow assembled in `entry` (§15.8). The program holds
+ * `entry` and the files of `opts.tsconfig` or of the nearest `tsconfig.json`
+ * (with the generated `.aflow/types`), with that file's compiler options.
  */
 export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): BuildResult {
   const file = resolve(entry);
@@ -106,8 +112,11 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
   }
 
   const configPath = opts.tsconfig ? resolve(opts.tsconfig) : ts.findConfigFile(dirname(file), ts.sys.fileExists);
-  const options = configPath ? (parseConfig(configPath, diagnostics)?.options ?? DEFAULT_OPTIONS) : DEFAULT_OPTIONS;
-  const program = ts.createProgram({ rootNames: [file], options });
+  const parsed = configPath ? parseConfig(configPath, diagnostics) : null;
+  const program = ts.createProgram({
+    rootNames: [file, ...(parsed?.fileNames ?? [])],
+    options: parsed?.options ?? DEFAULT_OPTIONS,
+  });
   const wf = analyzeProgram(ts, program).workflows.find((w) => w.entryFile !== null && resolve(w.entryFile) === file);
   if (!wf) {
     diagnostics.push(
@@ -120,10 +129,9 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
     return fail();
   }
 
-  diagnostics.push(...wf.diagnostics);
-  const set = loadSchemas(schemaSources(wf));
-  const { schemas, errors } = closure(set, schemaRoots(wf));
-  diagnostics.push(...schemaDiagnostics(ts, program, wf, [...set.errors, ...errors]));
+  diagnostics.push(...wf.diagnostics, ...typeErrors(program, wf));
+  const { schemas, diagnostics: schemaErrors } = schemaClosure(ts, program, wf);
+  diagnostics.push(...schemaErrors);
 
   const all = sortedUnique(diagnostics);
   const definition: WorkflowDefinition = {

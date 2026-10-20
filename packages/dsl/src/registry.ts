@@ -1,9 +1,11 @@
 /**
- * The `SchemaRegistry` typings of one workflow header (spec §15.7).
+ * The schemas of one workflow header (spec §10, §15.7, §15.8).
  *
  * `aflow types` and the editor plugin both write the registry through
- * `writeRegistryFor`. `ts` is injected, never imported: the plugin passes
- * tsserver's instance, so this module loads no second TypeScript.
+ * `writeRegistryFor`. `aflow build` and the plugin both check the schema
+ * closure through `schemaClosure`, so the two report the same errors.
+ * The caller gives `ts`, and this module does not import it. The plugin gives
+ * the instance of tsserver, so this module loads no second TypeScript.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,12 +13,13 @@ import { dirname, join, resolve } from "node:path";
 
 import type * as TS from "typescript";
 
+import type { JsonSchema } from "./surface/header.js";
 import type { AflowDiagnostic } from "./analyzer/diagnostics.js";
 import type { WorkflowAnalysis } from "./analyzer/index.js";
 import { generateRegistry } from "./schema/codegen.js";
-import { loadSchemas, type SchemaError, type SchemaSource } from "./schema/load.js";
+import { closure, loadSchemas, type SchemaError, type SchemaSource } from "./schema/load.js";
 
-/** The header `workflow(…)` call of `wf`, for diagnostics that belong to the header as a whole. */
+/** The header `workflow(…)` call of `wf`. Diagnostics for the full header go here. */
 function headerNode(ts: typeof TS, program: TS.Program, wf: WorkflowAnalysis): TS.Node | undefined {
   const sf = program.getSourceFile(wf.headerFile);
   for (const stmt of sf?.statements ?? []) {
@@ -29,7 +32,7 @@ function headerNode(ts: typeof TS, program: TS.Program, wf: WorkflowAnalysis): T
 }
 
 /** Schema errors as `schema` diagnostics at the header (§15.8). */
-export function schemaDiagnostics(
+function schemaDiagnostics(
   ts: typeof TS,
   program: TS.Program,
   wf: WorkflowAnalysis,
@@ -49,7 +52,7 @@ export function schemaDiagnostics(
   }));
 }
 
-/** The schema sources of a header: `schemas` files relative to the header file, and inline `types` (§15.2). */
+/** The schema sources of a header. These are the `schemas` files (relative to the header file) and the inline `types` (§15.2). */
 export function schemaSources(wf: WorkflowAnalysis): SchemaSource[] {
   const { header } = wf;
   const sources: SchemaSource[] = [];
@@ -63,8 +66,41 @@ export function schemaSources(wf: WorkflowAnalysis): SchemaSource[] {
   return sources;
 }
 
-/** The registry file of a header: `<header dir>/.aflow/types/<client_id>.<name>.d.ts` (§15.7). */
-function registryPath(wf: WorkflowAnalysis): string | null {
+/** The schema keys that the document names. These are `input`, `result`, the item types and the `call.output` types (§10). */
+function schemaRoots(wf: WorkflowAnalysis): string[] {
+  const roots = new Set<string>();
+  const add = (k: unknown) => {
+    if (typeof k === "string") roots.add(k);
+  };
+  add(wf.header.input);
+  add(wf.header.result);
+  for (const decl of Object.values(wf.header.items ?? {})) {
+    if (decl?.data !== "input") add(decl?.data);
+    add(decl?.objects);
+  }
+  for (const task of wf.definition.tasks) {
+    add(task.call?.output?.result_type);
+    add(task.call?.output?.error_type);
+  }
+  return [...roots];
+}
+
+/**
+ * The schemas that the document of `wf` reaches from its schema keys (§10).
+ * Load errors and unknown keys are `schema` diagnostics at the header.
+ */
+export function schemaClosure(
+  ts: typeof TS,
+  program: TS.Program,
+  wf: WorkflowAnalysis,
+): { schemas: Record<string, JsonSchema>; diagnostics: AflowDiagnostic[] } {
+  const set = loadSchemas(schemaSources(wf));
+  const { schemas, errors } = closure(set, schemaRoots(wf));
+  return { schemas, diagnostics: schemaDiagnostics(ts, program, wf, [...set.errors, ...errors]) };
+}
+
+/** The registry file of a header. The path is `<header dir>/.aflow/types/<client_id>.<name>.d.ts` (§15.7). */
+export function registryPath(wf: WorkflowAnalysis): string | null {
   const { client_id, name } = wf.header;
   if (typeof client_id !== "string" || typeof name !== "string") return null;
   return join(dirname(wf.headerFile), ".aflow", "types", `${client_id}.${name}.d.ts`);
@@ -82,7 +118,7 @@ function writeIfChanged(path: string, text: string): boolean {
  * Regenerates the `SchemaRegistry` typings of the header of `wf` (§15.7).
  * The file is written only when its content changes. `written` is the path
  * when it wrote, else `null`. Schema problems are `schema` diagnostics at the
- * header; this function does not throw on them.
+ * header. This function does not throw on them.
  */
 export function writeRegistryFor(
   ts: typeof TS,
