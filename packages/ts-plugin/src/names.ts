@@ -47,7 +47,7 @@ function propertyName(ts: Ts, name: TS.PropertyName): string | undefined {
 
 /**
  * The call whose object-literal argument holds `lit`, and the property path
- * from that argument down to `lit`. The value MAY be the result of an arrow at
+ * from that argument down to `lit`. The value can be the result of an arrow at
  * that path (`route: ({ type }) => type === … ? "a" : "b"`). The value cannot be
  * an operand, so a comparison string is not a name position.
  */

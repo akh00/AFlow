@@ -22,7 +22,7 @@
     "aflow": "./dist/cli.mjs"
   },
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.mjs --external:typescript"
+    "build": "GOMAXPROCS=2 esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.mjs --external:typescript"
   },
   "dependencies": {
     "typescript": "^5.7.2"

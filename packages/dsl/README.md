@@ -2,6 +2,40 @@
 
 The typed TypeScript DSL for AFlow workflows (spec §15).
 
+## The `aflow` command
+
+Build the command before you use it:
+
+```sh
+npm run build -w @aflow/dsl
+```
+
+The command has two subcommands:
+
+- `aflow types [--project <tsconfig>]` writes the schema typings of each workflow header in the project (§15.7).
+  The default project is `tsconfig.json` in the current directory.
+  The typings go to `.aflow/types/<client_id>.<name>.d.ts` next to the header file.
+- `aflow build <entry> [-o <file>]` writes the §13 JSON of the workflow that `<entry>` assembles (§15.8).
+  The JSON goes to stdout, or to `<file>` with `-o`.
+  The command uses the nearest `tsconfig.json` of `<entry>`. If there is no `tsconfig.json`, it uses strict default options.
+  It makes the schema typings from the schemas at each build, so you do not run `aflow types` first.
+
+The exit code is `0` when there is no error diagnostic.
+The exit code is `1` when there is an error diagnostic, a usage error or an unexpected failure.
+Warnings do not change the exit code.
+When `aflow build` fails, it writes no JSON.
+
+Each diagnostic is one line on stderr, with two spaces between the fields:
+
+```text
+file:line:column  severity  rule  message
+```
+
+- `file` is relative to the current directory when the file is in that directory. Otherwise, it is absolute.
+- `line` and `column` start at 1.
+- `severity` is `error` or `warning`.
+- `rule` is the analyzer rule, for example `unknown-task`, `outside-reference` or `type-error` (§15.4, §15.9).
+
 ## Editor support in Neovim
 
 The `@aflow/ts-plugin` package is a tsserver plugin. It gives the editor behaviours of spec §15.9:

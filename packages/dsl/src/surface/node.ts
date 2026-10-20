@@ -9,7 +9,7 @@
  * by these types.
  */
 
-import type { BodyKind, RetryConfig } from "@aflow/engine";
+import type { BodyKind, CallProvider, RetryConfig } from "@aflow/engine";
 
 import type {
   ChildOrAnyName,
@@ -148,7 +148,7 @@ export type OutputSpec<H extends WorkflowHeader, I extends ItemName<H>> = {
 /** §9 `call` — the only body kind that performs I/O; its result is captured. */
 export interface CallSpec<H extends WorkflowHeader, I extends ItemName<H>> {
   /** §9 */
-  provider: "http" | "sub_workflow" | "js";
+  provider: CallProvider;
   /** §9 — pure; computes the effect's input. */
   input?: Value<"call.input", H, I>;
   output?: OutputSpec<H, I>;
