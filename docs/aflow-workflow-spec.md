@@ -62,7 +62,10 @@ interface:
    defines and validates the JSON representation of any workflow.
 2. **Workflow DSL definition** — the typed TypeScript DSL (§15) authors use to
    write workflows, with autocomplete and compile-time checks derived from the
-   workflow's type `definitions` (§10).
+   workflow's JSON Schema types (§10). Delivered as `@aflow/dsl` (DSL surface,
+   static analyzer, schema codegen and the `aflow` command line) and
+   `@aflow/ts-plugin` (a TypeScript language-service plugin giving the editor
+   behaviours of §15.9 in any TypeScript-server editor).
 3. **DSL → plan compiler / converter** — a tool that compiles a DSL workflow into
    the canonical **plan**: the schema-valid workflow JSON, and its 1:1 hjson form
    (§14). Round-trippable: `DSL → hjson → JSON`.
@@ -539,11 +542,28 @@ Types are first-class and **travel with the workflow**, exactly as in
   }
   ```
 
-- **TS DSL projection.** A codegen step turns `definitions` into `.d.ts`. The DSL
-  presents each item type as `TypedItem<Data, Objects, Parent>`, so inside a node
-  bound to `order_line`, `this.data.order_item_id` and
-  `this.parent.objects.order` autocomplete and type-check. This is the mechanism
-  behind the requested autocomplete/highlighting.
+- **TS DSL projection.** In the DSL (§15) the types come from JSON Schema, in
+  three steps:
+  1. *Sources.* Shared message types live in ordinary JSON Schema files the author
+     owns (draft-07 `definitions` or 2020-12 `$defs`), referenced from the workflow
+     header's `schemas` under a namespace. Workflow-private shapes (item `objects`,
+     call results) MAY instead be declared inline in the header's `types`. Every
+     named schema gets a key `<namespace>.<Name>`; inline schemas use the
+     workflow's `client_id` as namespace (`<client_id>.<Name>`). Two schemas
+     resolving to the same key are an error. `$ref`s MAY point within a file or at
+     a relative file path referenced from the same header; remote (`http(s)`)
+     refs are not resolved — the build is offline.
+  2. *Codegen.* `aflow types` — and the editor plugin, whenever a referenced schema
+     file changes — turns every key into a member of `interface SchemaRegistry` in
+     `@aflow/dsl`, written to `.aflow/types/<client_id>.<name>.d.ts`. Inside a node
+     bound to `hotel_line`, `data.`, `objects.`, `parent.objects.` and `root.data.`
+     then autocomplete and type-check from the schemas (§15.4, §15.7).
+  3. *Build.* `aflow build` copies every key the workflow references (`input`,
+     `result`, `items.*.data`/`objects`, `call.output.result_type`/`error_type`),
+     plus everything reachable from them through `$ref`, into `definitions` under
+     their `<namespace>.<Name>` keys, rewriting `$ref`s to `#/definitions/…`.
+     Unreferenced schemas are not copied; the emitted document stays
+     self-contained and the engine never reads schema files.
 
 The engine validates `data`/`objects`/`input`/`result` against the referenced
 schemas.
@@ -705,78 +725,416 @@ JSON is what the engine loads and what the JSON Schema (§16) validates.
 
 ## 15. The TypeScript DSL
 
-The DSL is a typed builder that emits hjson/JSON. It is generated from (or authored
-alongside) the type `definitions` (§10), giving autocomplete, syntax highlighting
-and compile-time checks. Pure expressions are written as **typed arrow functions**
-that the DSL serializes to `$expr`/`$do` strings; effect bodies are declared with
-builder methods.
+The DSL is a typed TypeScript front for the §13 document — not a second language.
+Every DSL name that corresponds to a document field is spelled exactly as in §13
+(snake_case), every §13/§16 field and every body kind and extension (§6, §19) is
+expressible, and what the author writes is what runs: expression bodies reach the
+JSON verbatim apart from type erasure (§15.8).
+
+It is delivered as two packages (§1 artifact 2):
+
+- **`@aflow/dsl`** — the DSL surface types, the static analyzer, schema codegen and
+  the `aflow` command line:
+  - `aflow types [--project <tsconfig>]` regenerates the schema typings (§10);
+  - `aflow build <entry> [-o <file>]` emits the §13 JSON of the workflow assembled
+    in `<entry>`.
+- **`@aflow/ts-plugin`** — a TypeScript language-service plugin, enabled through
+  `compilerOptions.plugins` in the workflow project's `tsconfig.json`. It runs inside
+  the editor's existing TypeScript server, so no separate language server is
+  needed, and provides the editor behaviours of §15.9.
+
+### 15.1 Static, multi-file authoring
+
+DSL files are **analysed, never executed**. `aflow build` and the editor plugin read
+them through the TypeScript program; `build` is a compile step, not a runtime call.
+The DSL functions are inert at runtime (each returns its argument), and an engine
+MUST NOT be handed the result of importing a DSL module.
+
+- Task names, item-type names, schema keys, route targets and every other
+  non-expression value MUST be literals: strings, numbers, booleans, `null`, object
+  and array literals, template literals without substitutions, optionally wrapped in
+  `as const`, `satisfies` or parentheses. A computed value (`2 * 1000`, a variable, a
+  helper call, a spread) is an error (`not-static`).
+- The header, task groups and the assembly MUST be declared at module top level
+  (`const X = workflow(…)`, `const G = X.tasks(…)`, `export default X.assemble(…)`).
+  Tasks generated by loops or helper functions are an error.
+- A workflow MAY span several files. The **entry file** is the one whose default
+  export is `X.assemble(…)`; it imports the task groups, which may live in any module
+  (typically one per sub-flow). Groups are resolved through the TypeScript checker,
+  not by file name.
+
+### 15.2 The workflow header
 
 ```typescript
-import { workflow, InputItem, ChildItem } from "@aflow/dsl";
-import type { ChangeOrderRequest, ChangeOrderResponse, OrderLineData, OrderLineObjects } from "./generated.types";
-
-const wf = workflow<ChangeOrderRequest, ChangeOrderResponse>({
-  clientId: "someclient",
-  name: "change_order",
+export const wf = workflow({
+  client_id: "<client>",              // §13
+  name: "<name>",                     // §13
+  version: "1.0.0",                   // optional; §13
+  schemas: { "<namespace>": "<path>" },     // optional; JSON Schema files (§10)
+  types:   { "<Name>": { /* JSON Schema */ } }, // optional; inline schemas (§10)
+  input:  "<namespace>.<Name>",       // → definitions.input
+  result: "<namespace>.<Name>",       // → definitions.result
+  items: {                            // → items (§10)
+    "<item>": { data: "<key>" | "input", objects: "<key>", parent: "<item>" | null },
+  },
+  config: { /* §13 config */ },       // optional
 });
-
-// Item types: TypedItem<Data, Objects, Parent>
-const Input     = wf.item("input", InputItem<ChangeOrderRequest>());
-const OrderLine = wf.item("order_line", ChildItem<OrderLineData, OrderLineObjects, typeof Input>());
-
-wf.task("add_order_lines", Input, t => {
-  t.split(OrderLine, {
-    // `this` is fully typed → autocomplete on data/objects
-    selector: (self) =>
-      self.data.orderItemIds?.length
-        ? self.data.orderItemIds.map(id => ({ orderItemId: id }))
-        : self.objects.order.orderItems.map(oi => ({ orderItemId: oi.id })),
-    route: "enrich_order_line",
-    parallel: true,
-  });
-  t.route("change_order_item_router");
-});
-
-wf.task("change_rollback_router", Input, t => {
-  t.aggregate({
-    select: (self) => self.items.filter(i => i.objects?.changeOrderProcess?.transactionMode === "two_phase"),
-    until:  (set)  => set.every(i => i.nextTask === null),
-  });
-  t.targetState((self) =>
-    self.items.find(i => i.targetState === "failure" && !i.optional) ? "failure" : "success");
-  t.route({ success: "construct_updated_order", failure: "rollback_changes" });
-});
-
-wf.task("save_change", Input, t => {
-  t.durable().idempotent()
-   .retry({ inline: { maxCount: 0 }, offline: { maxCount: 10, interval: "5m" } });
-  t.call.http({
-    method: "POST",
-    url:    (self) => `${self.params["persistence.base-url"]}/orders/${self.data.orderId}`,
-    body:   (self) => self.objects.saveRequest,
-    output: (self, result) => { self.objects.saveStatus = result.status; },
-  });
-  t.route("return_result");
-});
-
-wf.call.js("score_fraud", Input, {          // effect: inline JS + bundled/artifactory library
-  bundle: { name: "fraud-utils", version: "1.4.0", entry: "com.example.FraudScorer" },
-  input:  (self) => ({ order: self.objects.order }),
-  script: async (input, lib) => await lib.score(input),
-  output: (self, result) => { self.objects.fraud = result; },
-});
-
-export default wf.build(); // → hjson / JSON
 ```
 
-DSL guarantees:
+- `schemas` maps a namespace to a JSON Schema file, by path relative to the header
+  file. `types` declares workflow-private shapes inline. Both contribute
+  `definitions` keys as §10 describes; `input`, `result`, `items.*.data`,
+  `items.*.objects` and `call.output.result_type`/`error_type` MUST name one of those
+  keys (`data` MAY also be `"input"`, the workflow input type).
+- The item declared with `parent: null` is the root item type (§3); the workflow
+  input becomes its `data`.
+- `config` mirrors §13 `config`. Wherever §13 holds an expression
+  (`default_target_state_setter`, `default_error_handler`'s `$do`, `task.route`),
+  the DSL holds an arrow function under the rules of §15.4.
+- The header is emitted as the §13 top level: `client_id`, `name`, `version`,
+  `definitions` (§10), `items` with `$ref`s into `definitions`, and `config`.
 
-- **Purity by construction.** `selector`/`until`/`route`/`targetState` callbacks are
-  serialized to `$expr`; the DSL forbids `await`/imports inside them (lint rule),
-  so authors cannot accidentally do I/O in an expression.
-- **Effect isolation.** I/O lives in `t.call.*` / `wf.call.js` only.
-- **Typed tree navigation.** `self.parent`, `self.items`, `self.root` are typed from
-  the item declarations.
+### 15.3 Task groups and assembly
+
+```typescript
+export const hotel_tasks = wf.tasks({
+  "<task_name>": { item: "<item>", /* §13 node fields minus name/item */ },
+});
+
+export default wf.assemble(order_tasks, hotel_tasks /* , … */);
+```
+
+- `wf.tasks({…})` declares a **task group**: an object whose property names are task
+  names (the §13 node `name`) and whose values are §13 nodes without `name`, with
+  `item` naming the item type the node binds to (§4). Every expression position holds
+  an arrow function (§15.4).
+- At most one body kind per node (§6, §16). The DSL types make a second body kind a
+  type error.
+- `wf.assemble(G1, G2, …)` defines the workflow as **exactly the listed groups**.
+  The emitted `tasks` array is in argument order, then property order within each
+  group. A task name declared in two groups is an error (`duplicate-task`); a group
+  declared for `wf` but listed in no `assemble` is a warning (`unassembled-group`).
+
+### 15.4 Expressions: parameters are the only way in
+
+Every pure expression position (§5) — and every `$do` position — takes an arrow
+function whose **single parameter is an object destructuring pattern** naming members
+of the engine's expression scope at that position (§15.5):
+
+```typescript
+target_state_setter: ({ items }) =>
+  items.some(i => i.target_state === "failure") ? "failure" : "success",
+
+enrich: ({ objects, data }) => { objects.total = data.order_lines.length; },
+```
+
+The parameter's type contains exactly the names valid at the position, typed for the
+node's item type: `data`/`objects` from the item declaration's schema keys (§10),
+`parent` and `root` from the item tree (§3), `items` as the union of the child item
+types (discriminated by `type`), `set` from what `select` returns, `parameters` from
+`config.parameters`. An arrow that reads no scope name writes `({}) => …`.
+
+Inside the arrow:
+
+- The only identifiers that MAY be referenced are the destructured parameters, locals
+  declared inside the arrow (including nested lambda parameters), and the engine's
+  safe globals (`Object`, `Array`, `JSON`, `Math` without `random`, `Number`,
+  `String`, `Map`, `Set`, …). The list is the one the engine enforces (§5); the
+  analyzer MUST take it from the engine, not from a copy.
+- Any other free identifier — a module constant, an import, a helper function, an
+  outer local — is an error (`outside-reference`), because the body is shipped as
+  source and evaluated where none of those exist. A name the engine forbids (`Date`,
+  `fetch`, `Promise`, …) is an error (`forbidden-global`) carrying the engine's
+  reason and §5.
+- `this`, `async`/`await` and `import()` are errors. `self` (in scope everywhere
+  except `split.item_type`) is the item view the engine binds `this` to.
+- The parameter MUST be one object pattern of shorthand names: renamed
+  (`{ data: d }`), defaulted (`{ data = {} }`), nested or rest elements, a
+  non-destructured parameter (`(s) => s.data`), or a name not in scope at the
+  position (`({ set })` in a `condition`) are errors (`param-shape`). The body is
+  emitted with the parameter names as the engine's bare identifiers, so any other
+  binding would change its meaning.
+- A block body (`$do`) MAY assign to members (`objects.x = …`,
+  `logging_context.y = …`) and rebind `data`, `target_state` and `next_task` — the
+  names the engine copies back to the item.
+
+The same analysis enforces these rules in the editor and in `aflow build`: a
+workflow that shows no error in the editor MUST build, and one that builds MUST have
+shown none.
+
+### 15.5 Scope per position
+
+*Base* is the scope every item-bound expression sees: `id`, `type`, `data`,
+`objects`, `tasks`, `trajectory`, `items`, `parent`, `root`, `next_task`,
+`target_state`, `logging_context`, `additional_properties`, `optional`, `parameters`,
+`ctx` (§19 E3), `self`.
+
+| Position | Scope |
+|---|---|
+| `condition`, `await.select`, `aggregate.select`, `enrich`, `split.selector`, `dispatch.select`, `route` (expression or `switch`; also `config.defaults.task.route`), `return.result` / `return.error`, `call.input`, `call.request.*` | base |
+| `split.route` (expression or `switch`) | base, bound to the produced child (§19 E1) |
+| `dispatch.route` (expression or `switch`) | base, bound to the dispatched item (§19 E4) |
+| `await.until`, `aggregate.until`, `aggregate.reduce` | base + `set` (§7) |
+| `call.output.transform`, `call.output.enrich` | base + `result`, `input` (§9, §11) |
+| `target_state_setter`, `config.defaults.item.default_target_state_setter` | base + `task_state`, `error`, `result` |
+| `config.defaults.task.default_error_handler` | base + `error`, `task_state` |
+| `split.item_type` (expression) | `data`, `index`, `objects`, `tasks`, `items`, `parent`, `root`, `parameters`, `ctx` — the child does not exist yet (§19 E1) |
+
+An arrow function anywhere else, other than `call.script` (§15.6), is an error
+(`not-static`).
+
+### 15.6 Effect code
+
+`call.script` (provider `js`, §9) is **effect** code: it MAY be `async` and receives
+`(input, lib)` as ordinary positional parameters; the determinism restrictions of
+§5 do not apply to it. It is shipped as source too, so it MUST obey the same
+no-outside-names rule as an expression: it may reference only its parameters, its
+own locals and the safe globals, and a module constant or import is an error
+(`outside-reference`).
+
+```typescript
+script: async (input, lib) => await lib.hold(input),
+```
+
+### 15.7 Types
+
+The DSL is typed from the workflow's own JSON Schemas (§10): `aflow types` (and the
+editor plugin, whenever a referenced schema file changes) generates
+`.aflow/types/<client_id>.<name>.d.ts` next to the header file, augmenting
+`interface SchemaRegistry` in `@aflow/dsl` with one member per `definitions` key.
+Schema keys in the header then complete and type-check, and so does every field
+reached from them in an expression. Generated files are build output and SHOULD NOT
+be committed. Types flow one way, schema → TypeScript; the DSL does not derive
+schemas from TypeScript types.
+
+### 15.8 Emission
+
+`aflow build <entry>` emits a §13 document that the engine runs unchanged:
+
+- An arrow with an **expression body** is emitted as `{ "$expr": "<body>" }`; one
+  with a **block body** as `{ "$do": "<body>" }`, without the outer braces and with
+  the common indentation removed. The body is type-erased and otherwise verbatim —
+  nothing is renamed, comments are kept.
+- `call.script` is emitted as the full arrow text, parameters included.
+- Literal values — including literal route strings, `cases` maps and `null` — are
+  emitted as they are written.
+- Expression text MUST be taken from the TypeScript source, never from
+  `Function.prototype.toString()` of a transpiled or bundled function, so the output
+  does not depend on the author's toolchain.
+- `definitions` holds `input`/`result` `$ref`s plus the transitive `$ref` closure of
+  every referenced schema key (§10). The engine never reads schema files.
+- `build` keeps the source location (file, line, column) of every task and every
+  expression and exposes it through its API; the locations are not part of the
+  emitted JSON.
+
+Any error diagnostic (§15.4, §15.9) fails the build; nothing is emitted.
+
+### 15.9 Editor conformance (artifact 2)
+
+A conforming DSL toolchain (§1 artifact 2) MUST provide, inside a stock
+TypeScript-server editor with `@aflow/ts-plugin` enabled, with no manual regeneration
+step while editing:
+
+1. **Field completion from the workflow's types** — `data.`, `objects.`, `parent.`,
+   `items[0].`, `set[0].` — and `result.` when `call.output.result_type` is given —
+   complete and type-check from the schemas of §10 / §15.7.
+2. **Name completion** — route targets (`route`, `cases`, `default`, `split.route`,
+   `dispatch.route`, `config.defaults.entry`) offer every task of the workflow,
+   wherever in the workflow's files it is declared; `item`, `split.item_type` and
+   `items.*.parent` offer only declared item types.
+3. **Graph diagnostics as you type**, reported in the file where the offending task
+   is declared:
+
+   | Check | Severity |
+   |---|---|
+   | a route, `cases`/`default` value, `split.route`, `dispatch.route` or `config.defaults.entry` names no task (`unknown-task`); a route expression is checked when its type is a union of string literals | error |
+   | more than one body kind on a node (§16) (`multiple-bodies`) | error |
+   | a route sends an item to a task bound to a different item type — the same item for `route`, a child type for `split.route`/`dispatch.route` (`item-type-mismatch`) | error |
+   | a literal `target_state_setter` result outside a declared `allowed_target_states` (`target-state`) | error |
+   | a task no route, split, dispatch or entry can reach (`unreachable`) — not reported when a route expression's targets are not a literal union | warning |
+
+4. **Determinism diagnostics inside expressions** — every §15.4 / §15.6 violation
+   (`outside-reference`, `forbidden-global`, `this`, `async`, `dynamic-import`,
+   `param-shape`), at the offending identifier or parameter.
+5. **Hover documentation** on DSL fields and body kinds citing the spec section and
+   its normative rule — e.g. `aggregate`: "§7 — `until` MUST be monotonic; `reduce`
+   MUST be commutative and associative."
+
+### 15.10 Worked example: `book_travel_order`
+
+The booking workflow of the engine's test suite (`test/fixtures/booking-workflow.ts`,
+flow in its header comment) in the DSL, split over four files. Excerpt: the header,
+the entry file, the root's first task, the barrier and dispatch, and the hotel
+line's first phase. The flight group is analogous to the hotel group.
+
+```typescript
+// header.ts — types, items, config
+import { workflow } from "@aflow/dsl";
+
+export const wf = workflow({
+  client_id: "travelco",
+  name: "book_travel_order",
+  version: "1.0.0",
+  schemas: { travelco: "./schemas/travelco.json" },  // BookingRequest, BookingResponse, …
+  types: {                                           // workflow-private → "travelco.<Name>"
+    OrderObjects:      { type: "object" },
+    HotelLineData:     { type: "object" },
+    HotelLineObjects:  { type: "object" },
+    FlightLineData:    { type: "object" },
+    FlightLineObjects: { type: "object" },
+    HotelRecord:       { type: "object" },
+  },
+  input:  "travelco.BookingRequest",
+  result: "travelco.BookingResponse",
+  items: {
+    order:       { data: "input",                   objects: "travelco.OrderObjects",      parent: null },
+    hotel_line:  { data: "travelco.HotelLineData",  objects: "travelco.HotelLineObjects",  parent: "order" },
+    flight_line: { data: "travelco.FlightLineData", objects: "travelco.FlightLineObjects", parent: "order" },
+  },
+  config: {
+    bundles: [
+      { name: "hotel-supplier", version: "2.1.0" },
+      { name: "flight-supplier", version: "1.0.3" },
+    ],
+    defaults: {
+      item: { objects: {}, target_state: "success", allowed_target_states: ["success", "failure"] },
+      concurrency: { max_parallel: 8 },
+      entry: "Input",
+    },
+  },
+});
+```
+
+```typescript
+// order.ts — root item: normalise, fan out, barriers, dispatch (excerpt)
+import { wf } from "./header";
+
+export const order_tasks = wf.tasks({
+  Input: {
+    item: "order",
+    enrich: ({ objects, data, logging_context }) => {
+      objects.payment = data.payment_instrument;
+      objects.lines_total = data.order_lines.reduce((sum, l) => sum + l.amount, 0);
+      logging_context.order_id = data.order_id;
+      logging_context.customer_id = data.customer.id;
+    },
+    route: "split_order_lines",
+  },
+
+  split_order_lines: {
+    item: "order",
+    split: {
+      item_type: ({ data }) => data.product_type === "hotel" ? "hotel_line" : "flight_line", // §19 E1
+      selector: ({ data }) => data.order_lines,
+      route: ({ type }) => type === "hotel_line" ? "create_hotel_record" : "book_flight",
+      parallel: true,
+    },
+    route: "await_reservations",
+  },
+
+  await_reservations: {
+    item: "order",
+    aggregate: {                                           // §7
+      select: ({ items }) => items,
+      until: ({ set }) => set.every(i => i.objects.phase === "reserved"),
+      reduce: ({ objects, set }) => {
+        objects.all_reserved = set.every(i => i.target_state === "success");
+      },
+    },
+    target_state_setter: ({ objects }) => objects.all_reserved ? "success" : "failure",
+    route: "commit_or_rollback",
+  },
+
+  commit_or_rollback: {
+    item: "order",
+    dispatch: {                                            // §19 E4
+      select: ({ items }) => items,
+      // Bound to each dispatched line, not to the order.
+      route: ({ root, type, target_state, objects }) =>
+        root.objects.all_reserved
+          ? (type === "hotel_line" ? "commit_hotel_booking" : "confirm_flight")
+          : (target_state === "success"
+              ? (type === "hotel_line" ? "release_hotel_hold" : "cancel_flight_booking")
+              : (type === "hotel_line"
+                  ? (objects.record_id !== undefined ? "discard_hotel_record" : "mark_hotel_abandoned")
+                  : "mark_flight_abandoned")),
+    },
+    route: "await_settlement",
+  },
+
+  // … await_settlement, return_result, return_error
+});
+```
+
+```typescript
+// hotel.ts — hotel line, phase 1 (excerpt)
+import { wf } from "./header";
+
+export const hotel_tasks = wf.tasks({
+  create_hotel_record: {
+    item: "hotel_line",
+    timeout: 5000,
+    call: {
+      provider: "js",
+      implementation: { bundle_name: "hotel-supplier", bundle_version: "2.1.0" },
+      input: ({ data, root }) => ({ line: data, order_id: root.data.order_id, customer: root.data.customer }),
+      script: async (input, lib) => await lib.createRecord(input),         // effect code, §15.6
+      output: {
+        result_type: "travelco.HotelRecord",
+        enrich: ({ objects, result }) => { objects.record_id = result.record_id; },
+      },
+    },
+    route: { cases: { success: "hold_hotel_room", failure: "mark_hotel_reserved" } },
+  },
+
+  hold_hotel_room: {
+    item: "hotel_line",
+    timeout: 5000,
+    retry: { inline: { max_count: 1, interval: "5ms" } },
+    call: {
+      provider: "js",
+      implementation: { bundle_name: "hotel-supplier", bundle_version: "2.1.0" },
+      input: ({ objects, data, root }) => ({ record_id: objects.record_id, line: data, payment: root.objects.payment }),
+      script: async (input, lib) => await lib.hold(input),
+      output: { enrich: ({ objects, result }) => { objects.hold_id = result.hold_id; } },
+    },
+    target_state_setter: ({ task_state }) => task_state.status === "success" ? "success" : "failure",
+    route: "mark_hotel_reserved",
+  },
+
+  // … mark_hotel_reserved, commit_hotel_booking, release_hotel_hold, …
+});
+```
+
+```typescript
+// book_travel_order.ts — the entry file
+import { wf } from "./header";
+import { order_tasks } from "./order";
+import { hotel_tasks } from "./hotel";
+import { flight_tasks } from "./flight";
+
+export default wf.assemble(order_tasks, hotel_tasks, flight_tasks);
+```
+
+`aflow build book_travel_order.ts` emits, for `hold_hotel_room`:
+
+```jsonc
+{ "name": "hold_hotel_room", "item": "hotel_line", "timeout": 5000,
+  "retry": { "inline": { "max_count": 1, "interval": "5ms" } },
+  "call": { "provider": "js",
+            "implementation": { "bundle_name": "hotel-supplier", "bundle_version": "2.1.0" },
+            "input":  { "$expr": "({ record_id: objects.record_id, line: data, payment: root.objects.payment })" },
+            "script": "async (input, lib) => await lib.hold(input)",     // full arrow text
+            "output": { "enrich": { "$do": "objects.hold_id = result.hold_id;" } } },  // block body, braces dropped
+  "target_state_setter": { "$expr": "task_state.status === \"success\" ? \"success\" : \"failure\"" },
+  "route": "mark_hotel_reserved" }
+```
+
+and `definitions` holding `input`, `result`, the six inline `travelco.*` types and
+the closure of `travelco.BookingRequest` / `travelco.BookingResponse` from
+`schemas/travelco.json` (including `travelco.PaymentInstrument`, reached by `$ref`).
+Task order in `tasks` is `order_tasks`, then `hotel_tasks`, then `flight_tasks`,
+each in property order.
 
 ---
 
@@ -991,7 +1349,8 @@ flowchart TD
 
 ### hjson & DSL
 
-See §14 and §15 for the same nodes in hjson and TypeScript. The three forms are
+See §14 for the same nodes in hjson, and §15.10 for the DSL form (shown on the
+booking workflow rather than `change_order`). The three forms are
 interchangeable; JSON is what the engine loads and the schema (§16) validates.
 
 ---
