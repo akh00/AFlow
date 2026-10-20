@@ -13,6 +13,7 @@ import type * as TS from "typescript";
 
 import type { WorkflowHeader } from "../surface/header.js";
 import { type Position, SCOPE_AT, STATEMENT_POSITIONS } from "../surface/scope.js";
+import { checkBoundary } from "./boundary.js";
 import { type AflowDiagnostic, diagnosticAt } from "./diagnostics.js";
 import { emitArrow, emitScript, emitStatements } from "./emit.js";
 import type { Loc, SourceLocations, WorkflowAnalysis } from "./index.js";
@@ -103,6 +104,7 @@ function positionAt(path: LiteralPath, base: "node" | "config"): Position | null
 /** The arrow handler for one literal walk: emits arrows at legal positions and records them. */
 function arrowHandler(
   ts: Ts,
+  checker: TS.TypeChecker,
   base: "node" | "config",
   exprs: ExprRecord[],
   diagnostics: AflowDiagnostic[],
@@ -111,11 +113,13 @@ function arrowHandler(
     const record = () => exprs.push({ pointer: pointerOf(path), loc: locOf(arrow), arrow });
     if (base === "node" && path.join(".") === "call.script") {
       record();
+      diagnostics.push(...checkBoundary(ts, checker, arrow, null, "effect"));
       return { value: emitScript(ts, arrow, diagnostics) };
     }
     const position = positionAt(path, base);
     if (!position) return null;
     record();
+    diagnostics.push(...checkBoundary(ts, checker, arrow, position, "pure"));
     if (position === ERROR_HANDLER) return { value: emitStatements(ts, arrow, diagnostics) };
     if (ts.isBlock(arrow.body) && !(STATEMENT_POSITIONS as readonly string[]).includes(position)) {
       diagnostics.push(
@@ -197,10 +201,10 @@ function objectArgument(ts: Ts, call: TS.CallExpression, diagnostics: AflowDiagn
 
 // ── extraction ─────────────────────────────────────────────────────────────
 
-function extractHeader(ts: Ts, h: HeaderDecl): void {
+function extractHeader(ts: Ts, checker: TS.TypeChecker, h: HeaderDecl): void {
   const lit = objectArgument(ts, h.call, h.diagnostics);
   if (!lit) return;
-  const walk = { diagnostics: h.diagnostics, onArrow: arrowHandler(ts, "config", h.exprs, h.diagnostics) };
+  const walk = { diagnostics: h.diagnostics, onArrow: arrowHandler(ts, checker, "config", h.exprs, h.diagnostics) };
   const header = (readLiteral(ts, lit, walk) ?? {}) as WorkflowHeader;
   h.header = header;
   const definitions: Record<string, unknown> = {};
@@ -224,7 +228,7 @@ function extractHeader(ts: Ts, h: HeaderDecl): void {
   };
 }
 
-function extractGroup(ts: Ts, g: GroupDecl): void {
+function extractGroup(ts: Ts, checker: TS.TypeChecker, g: GroupDecl): void {
   const lit = objectArgument(ts, g.call, g.diagnostics);
   if (!lit) return;
   for (const p of lit.properties) {
@@ -249,7 +253,7 @@ function extractGroup(ts: Ts, g: GroupDecl): void {
       continue;
     }
     const exprs: ExprRecord[] = [];
-    const walk = { diagnostics: g.diagnostics, onArrow: arrowHandler(ts, "node", exprs, g.diagnostics) };
+    const walk = { diagnostics: g.diagnostics, onArrow: arrowHandler(ts, checker, "node", exprs, g.diagnostics) };
     const { name: _ignored, ...fields } = readLiteral(ts, value, walk) as Record<string, unknown>;
     g.tasks.push({ name, node: { name, ...fields } as Node, loc: locOf(p.name), exprs });
   }
@@ -366,8 +370,8 @@ export function extractWorkflows(
     }
   }
 
-  for (const h of headers.values()) extractHeader(ts, h);
-  for (const g of groups.values()) extractGroup(ts, g);
+  for (const h of headers.values()) extractHeader(ts, checker, h);
+  for (const g of groups.values()) extractGroup(ts, checker, g);
 
   for (const { header, call } of assemblies) {
     const entry: EntryDecl = { file: call.getSourceFile().fileName, groups: [], diagnostics: [] };
