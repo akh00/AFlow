@@ -832,7 +832,9 @@ The parameter's type contains exactly the names valid at the position, typed for
 node's item type: `data`/`objects` from the item declaration's schema keys (§10),
 `parent` and `root` from the item tree (§3), `items` as the union of the child item
 types (discriminated by `type`), `set` from what `select` returns, `parameters` from
-`config.parameters`. An arrow that reads no scope name writes `({}) => …`.
+`config.parameters`. In `split.item_type`, `data` is the element the selector
+produced for this child (typed from the selector's return element type) and `index`
+is a `number`. An arrow that reads no scope name writes `({}) => …`.
 
 Inside the arrow:
 
@@ -846,14 +848,22 @@ Inside the arrow:
   source and evaluated where none of those exist. A name the engine forbids (`Date`,
   `fetch`, `Promise`, …) is an error (`forbidden-global`) carrying the engine's
   reason and §5.
-- `this`, `async`/`await` and `import()` are errors. `self` (in scope everywhere
-  except `split.item_type`) is the item view the engine binds `this` to.
+- `this` (`this`), `async`/`await` (`async`) and `import()` (`dynamic-import`) are
+  errors. `self` (in scope everywhere except `split.item_type`) is the item view the
+  engine binds `this` to.
 - The parameter MUST be one object pattern of shorthand names: renamed
   (`{ data: d }`), defaulted (`{ data = {} }`), nested or rest elements, a
   non-destructured parameter (`(s) => s.data`), or a name not in scope at the
   position (`({ set })` in a `condition`) are errors (`param-shape`). The body is
   emitted with the parameter names as the engine's bare identifiers, so any other
   binding would change its meaning.
+- The body form is fixed by the position. **Value positions** — every position of
+  §15.5 except the four statement positions below — MUST use an expression body,
+  because the engine yields `undefined` for a `$do` where it expects a value. The
+  **statement positions** `enrich`, `aggregate.reduce`, `call.output.enrich` and
+  `config.defaults.task.default_error_handler` MAY use either form;
+  `default_error_handler` is always emitted as `$do` (§15.8), because the engine
+  runs only its `$do`. A block body at a value position is an error (`body-form`).
 - A block body (`$do`) MAY assign to members (`objects.x = …`,
   `logging_context.y = …`) and rebind `data`, `target_state` and `next_task` — the
   names the engine copies back to the item.
@@ -914,7 +924,9 @@ schemas from TypeScript types.
 - An arrow with an **expression body** is emitted as `{ "$expr": "<body>" }`; one
   with a **block body** as `{ "$do": "<body>" }`, without the outer braces and with
   the common indentation removed. The body is type-erased and otherwise verbatim —
-  nothing is renamed, comments are kept.
+  nothing is renamed, comments are kept. The one exception is
+  `default_error_handler`, which is always emitted as `$do` (an expression body
+  becomes its statement text), because the engine runs only its `$do` member.
 - `call.script` is emitted as the full arrow text, parameters included.
 - Literal values — including literal route strings, `cases` maps and `null` — are
   emitted as they are written.
@@ -955,7 +967,7 @@ step while editing:
 
 4. **Determinism diagnostics inside expressions** — every §15.4 / §15.6 violation
    (`outside-reference`, `forbidden-global`, `this`, `async`, `dynamic-import`,
-   `param-shape`), at the offending identifier or parameter.
+   `param-shape`, `body-form`), at the offending identifier, parameter or body.
 5. **Hover documentation** on DSL fields and body kinds citing the spec section and
    its normative rule — e.g. `aggregate`: "§7 — `until` MUST be monotonic; `reduce`
    MUST be commutative and associative."
