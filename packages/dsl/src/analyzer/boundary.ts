@@ -25,10 +25,25 @@ const SAFE = new Set(SAFE_GLOBAL_NAMES);
  */
 const MATH_RANDOM_REASON = "the RNG";
 
-/** True if the declaration `d` is in a default library file (`lib.*.d.ts`). */
-function isLibDeclaration(d: TS.Declaration): boolean {
-  const sf = d.getSourceFile();
-  return sf.isDeclarationFile && sf.hasNoDefaultLib;
+/** True if `d` is inside a `declare global { … }` block. */
+function inGlobalAugmentation(ts: Ts, d: TS.Node): boolean {
+  for (let n: TS.Node | undefined = d.parent; n; n = n.parent) {
+    if (ts.isModuleDeclaration(n) && n.flags & ts.NodeFlags.GlobalAugmentation) return true;
+  }
+  return false;
+}
+
+/**
+ * True if `symbol` is a host global: its value is declared ambiently, in a
+ * `.d.ts` file (the default lib, `@types/node`) or in `declare global`.
+ * The value side decides, so an augmentation of a lib interface (`interface
+ * Array<T>` in `@types/node` or in user code) does not change the answer.
+ * An unresolved name and a checker intrinsic (`undefined`) count as host globals.
+ */
+function isAmbientGlobal(ts: Ts, symbol: TS.Symbol | undefined): boolean {
+  if (!symbol) return true;
+  const decls = symbol.valueDeclaration ? [symbol.valueDeclaration] : (symbol.declarations ?? []);
+  return decls.every((d) => d.getSourceFile().isDeclarationFile || inGlobalAugmentation(ts, d));
 }
 
 /** `file:line` of a declaration, for the message. */
@@ -107,7 +122,8 @@ function checkParams(ts: Ts, arrow: TS.ArrowFunction, position: Position): Aflow
  *
  * `kind` is `"pure"` for a §15.5 position, with `position` set. It is
  * `"effect"` for `call.script` (§15.6), with `position` `null`: effect code is
- * exempt from `param-shape` and `async`, not from the name rules.
+ * exempt from `param-shape`, `async` and `forbidden-global`, and may use
+ * any host global (R20). It is not exempt from `outside-reference`.
  */
 export function checkBoundary(
   ts: Ts,
@@ -130,17 +146,19 @@ export function checkBoundary(
     const name = id.text;
     const decls = symbol?.declarations ?? [];
     if (decls.some(inside)) return;
-    // A symbol without declarations is a checker intrinsic (`undefined`); an unresolved name has no symbol.
-    const lib = symbol ? decls.every(isLibDeclaration) : true;
-    if (SAFE.has(name) && lib) return;
+    const ambient = isAmbientGlobal(ts, symbol);
+    // R20: effect code runs with the host globals; only user declarations are out of reach.
+    if (ambient && (kind === "effect" || SAFE.has(name))) return;
     const reason = FORBIDDEN_REASONS.get(name);
-    if (reason !== undefined && lib) {
+    if (reason !== undefined && ambient) {
       out.push(diagnosticAt(id, "forbidden-global", `\`${name}\` is forbidden in an expression: ${reason} (§5).`));
       return;
     }
-    const where = decls[0]
-      ? `${symbol!.flags & ts.SymbolFlags.Alias ? "imported" : "declared"} outside the expression, at ${whereDeclared(decls[0])}`
-      : "not declared in the expression and is not an engine safe global";
+    const where = !symbol
+      ? "not declared anywhere"
+      : ambient
+      ? "a host global, not an engine safe global"
+      : `${symbol!.flags & ts.SymbolFlags.Alias ? "imported" : "declared"} outside the expression, at ${whereDeclared(decls[0]!)}`;
     out.push(
       diagnosticAt(
         id,
@@ -157,8 +175,7 @@ export function checkBoundary(
       obj = n.expression;
     }
     if (!obj || !ts.isIdentifier(obj) || obj.text !== "Math") return undefined;
-    const decls = checker.getSymbolAtLocation(obj)?.declarations ?? [];
-    return decls.length > 0 && decls.every(isLibDeclaration) ? n as TS.Expression : undefined;
+    return isAmbientGlobal(ts, checker.getSymbolAtLocation(obj)) ? (n as TS.Expression) : undefined;
   };
 
   const visit = (node: TS.Node, ownThis: boolean): void => {
@@ -183,7 +200,7 @@ export function checkBoundary(
         out.push(diagnosticAt(node, "async", "An `async` function is not available in a pure expression (§5, §15.4)."));
       }
     }
-    const random = isMathRandom(node);
+    const random = kind === "pure" ? isMathRandom(node) : undefined;
     if (random) {
       out.push(diagnosticAt(random, "forbidden-global", `\`Math.random\` is forbidden in an expression: ${MATH_RANDOM_REASON} (§5).`));
     }

@@ -34,9 +34,13 @@ export const wf = workflow({
 
 const HELPERS = `export const helper = (n: number) => n + 1;\n`;
 
-/** A one-task workflow: task `t` on item `order` carries `fields`; `extra` is module code before the group. */
-function program(fields: string, extra = "") {
+/**
+ * A one-task workflow: task `t` on item `order` carries `fields`; `extra` is module code before the group.
+ * With `node`, the program also loads `@types/node`, as a real project does.
+ */
+function program(fields: string, extra = "", node = false) {
   return programOf({
+    ...(node && { "node-types.d.ts": `/// <reference types="node" />\n` }),
     "registry.d.ts": REGISTRY,
     "header.ts": HEADER,
     "helpers.ts": HELPERS,
@@ -60,8 +64,8 @@ const BOUNDARY_RULES: readonly RuleId[] = [
 ];
 
 /** The boundary diagnostics of the program built from `fields` / `extra`. */
-function boundary(fields: string, extra = ""): AflowDiagnostic[] {
-  return analyzeProgram(ts, program(fields, extra)).diagnostics.filter((d) => BOUNDARY_RULES.includes(d.rule));
+function boundary(fields: string, extra = "", node = false): AflowDiagnostic[] {
+  return analyzeProgram(ts, program(fields, extra, node)).diagnostics.filter((d) => BOUNDARY_RULES.includes(d.rule));
 }
 
 const rules = (ds: AflowDiagnostic[]) => ds.map((d) => d.rule);
@@ -186,5 +190,59 @@ describe("checkBoundary — call.script (§15.6)", () => {
     const ds = boundary(call(`async (input, lib) => await lib.x(URL_BASE + input)`), `const URL_BASE = "https://x";`);
     expect(rules(ds)).toEqual(["outside-reference"]);
     expect(ds[0]!.message).toContain("`URL_BASE`");
+  });
+});
+
+// ── ambient globals (fix round 1) ──────────────────────────────────────────
+
+describe("checkBoundary — ambient globals", () => {
+  it("@types/node is really loaded (fixture sanity)", () => {
+    const p = program(`condition: ({}) => true`, "", true);
+    expect(p.getSourceFiles().some((sf) => sf.fileName.includes("@types/node/compatibility/indexable.d.ts"))).toBe(true);
+  });
+
+  it("safe globals stay safe when @types/node adds declarations to them", () => {
+    expect(boundary(`condition: ({ data }) => Array.isArray(data.lines) && String(1) === "1"`, "", true)).toEqual([]);
+  });
+
+  it("a user augmentation of a lib interface keeps the global safe", () => {
+    const extra = `declare global { interface Array<T> { aflowExtra?: T } }`;
+    expect(boundary(`condition: ({ data }) => Array.isArray(data.lines)`, extra)).toEqual([]);
+  });
+
+  it("Math.random stays forbidden when Math is augmented", () => {
+    const ds = boundary(`condition: ({}) => Math.random() > 0.5`, `declare global { interface Math { aflowExtra?: number } }`);
+    expect(rules(ds)).toEqual(["forbidden-global"]);
+  });
+
+  it("an ambient global that is not safe is an outside-reference in a pure expression", () => {
+    expect(rules(boundary(`condition: ({ data }) => { console.log(data); return true; }`, "", true))).toEqual([
+      "outside-reference",
+    ]);
+  });
+
+  it("text in a template literal or a comment is not a reference", () => {
+    const fields = "condition: ({ data }) => /* Date.now() */ `Date.now() => { this ${data.order_id}`.length > 0";
+    expect(boundary(fields)).toEqual([]);
+  });
+});
+
+describe("checkBoundary — call.script and ambient globals (R20)", () => {
+  const call = (script: string) =>
+    `call: { provider: "js", input: ({ data }) => data, script: ${script}, output: { result_type: "acme.Hold" } }`;
+
+  it("a script may use forbidden and ambient globals", () => {
+    const script = `async (input, lib) => {
+      const t = Date.now() + Math.random();
+      setTimeout(() => process.exit(0), 1);
+      const r = await fetch(new URL(String(input), "https://x"));
+      return lib.x(t, r);
+    }`;
+    expect(boundary(call(script), "", true)).toEqual([]);
+  });
+
+  it("a script still may not use a module constant", () => {
+    const ds = boundary(call(`async (input, lib) => await lib.x(URL_BASE + input)`), `const URL_BASE = "https://x";`, true);
+    expect(rules(ds)).toEqual(["outside-reference"]);
   });
 });
