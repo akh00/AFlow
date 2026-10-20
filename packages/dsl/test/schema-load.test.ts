@@ -113,8 +113,19 @@ describe("diagnostics instead of throws", () => {
     expect(set.errors.some((e) => e.kind === "unresolved-ref" && e.message.includes("100%"))).toBe(true);
   });
 
-  it("decodes ~1 in a pointer", () => {
-    expect(set.byKey.get("d.Slash")).toEqual({ $ref: "#/definitions/d.a/b" });
+  it("decodes ~1 in a pointer and escapes the rewritten ref (R18)", () => {
+    expect(set.byKey.get("d.Slash")).toEqual({ $ref: "#/definitions/d.a~1b" });
+    expect(set.errors.some((e) => e.message.includes("d.a"))).toBe(false);
+    expect(Object.keys(closure(set, ["d.Slash"]).schemas)).toEqual(["d.Slash", "d.a/b"]);
+  });
+
+  it("escapes ~ and / in rewritten inline refs, as the analyzer does (R18)", () => {
+    const s = loadSchemas([
+      { namespace: "n", inline: { A: { $ref: "#/definitions/x~0y~1z" }, "x~y/z": { type: "string" } } },
+    ]);
+    expect(s.errors).toEqual([]);
+    expect(s.byKey.get("n.A")).toEqual({ $ref: "#/definitions/n.x~0y~1z" });
+    expect(Object.keys(closure(s, ["n.A"]).schemas)).toEqual(["n.A", "n.x~y/z"]);
   });
 
   it("closure reports an unknown root and keeps going", () => {

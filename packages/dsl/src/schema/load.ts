@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { JsonSchema } from "../surface/header.js";
+import { keyOfRef, refOfKey } from "./ref.js";
 
 export interface SchemaSource {
   /** The header `schemas` key, or the workflow's `client_id` for inline types. */
@@ -28,7 +29,6 @@ export interface SchemaSet {
   errors: SchemaError[];
 }
 
-const DEFINITIONS_PREFIX = "#/definitions/";
 /** Keywords whose value is a map of name -> schema (names are not keywords). */
 const SCHEMA_MAPS = new Set(["properties", "patternProperties", "definitions", "$defs", "dependentSchemas"]);
 /** Keywords whose value is data, never a schema. */
@@ -95,11 +95,11 @@ export function loadSchemas(sources: SchemaSource[]): SchemaSet {
       } catch {
         return err("unresolved-ref", `$ref "${ref}" has a malformed percent escape`);
       }
-      return `${DEFINITIONS_PREFIX}${ns}.${name}`;
+      return refOfKey(`${ns}.${name}`);
     }
     if (pointer === "" || pointer === "/") {
       const title = path === "" ? [...titles][0] : rootTitle(targetFile!);
-      if (title) return `${DEFINITIONS_PREFIX}${ns}.${title}`;
+      if (title) return refOfKey(`${ns}.${title}`);
     }
     return err("unresolved-ref", `$ref "${ref}" does not name a definition or a titled root schema`);
   };
@@ -153,8 +153,8 @@ export function loadSchemas(sources: SchemaSource[]): SchemaSet {
   // Post-load pass: every rewritten ref must name a loaded key.
   for (const [key, schema] of set.byKey) {
     mapRefs(schema, (ref) => {
-      if (ref.startsWith(DEFINITIONS_PREFIX)) {
-        const target = ref.slice(DEFINITIONS_PREFIX.length);
+      const target = keyOfRef(ref);
+      if (target !== undefined) {
         if (!set.byKey.has(target)) {
           set.errors.push({ kind: "unresolved-ref", message: `"${key}" references undefined schema "${target}"`, file: fileOf.get(key) });
         }
@@ -187,7 +187,8 @@ export function closure(
     }
     seen.add(key);
     mapRefs(schema, (ref) => {
-      if (ref.startsWith(DEFINITIONS_PREFIX)) stack.push(ref.slice(DEFINITIONS_PREFIX.length));
+      const target = keyOfRef(ref);
+      if (target !== undefined) stack.push(target);
       return ref;
     });
   }

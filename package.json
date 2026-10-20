@@ -14,7 +14,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretypecheck": "npm run build -w @aflow/dsl && node packages/dsl/dist/cli.mjs types --project packages/dsl/test/fixtures/booking/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p packages/dsl/test/fixtures/booking/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },

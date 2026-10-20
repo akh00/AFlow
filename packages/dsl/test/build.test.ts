@@ -1,0 +1,226 @@
+/**
+ * `buildWorkflow`, `generateTypes` and the `aflow` CLI (spec §15.7, §15.8,
+ * §15.10), proven on the booking workflow of the engine's test suite.
+ */
+
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { bookingWorkflow } from "../../../test/fixtures/booking-workflow.js";
+import { buildWorkflow, generateTypes } from "../src/build.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../..");
+const booking = join(here, "fixtures", "booking");
+const entry = join(booking, "book_travel_order.ts");
+const cli = join(repo, "packages", "dsl", "dist", "cli.mjs");
+
+/** Collapses the whitespace of every `$expr` / `$do` string; everything else stays exact (Ruling R11). */
+function normalise(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(normalise);
+  if (typeof v !== "object" || v === null) return v;
+  return Object.fromEntries(
+    Object.entries(v).map(([k, x]) => [
+      k,
+      (k === "$expr" || k === "$do") && typeof x === "string" ? x.replace(/\s+/g, " ").trim() : normalise(x),
+    ]),
+  );
+}
+
+// Workflows that must not build live in a temporary directory (Ruling R3).
+const tmp = mkdtempSync(join(tmpdir(), "aflow-build-"));
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+/** Writes `files` into a fresh directory under `tmp`, with a tsconfig that resolves the packages. */
+function project(name: string, files: Record<string, string>): string {
+  const dir = join(tmp, name);
+  mkdirSync(dir, { recursive: true });
+  const tsconfig = {
+    compilerOptions: {
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "bundler",
+      types: [],
+      paths: {
+        "@aflow/dsl": [join(repo, "packages/dsl/src/index.ts")],
+        "@aflow/engine": [join(repo, "src/index.ts")],
+      },
+    },
+    include: ["*.ts", ".aflow/types/*.d.ts"],
+  };
+  writeFileSync(join(dir, "tsconfig.json"), JSON.stringify(tsconfig, null, 2));
+  for (const [f, text] of Object.entries(files)) writeFileSync(join(dir, f), text);
+  return dir;
+}
+
+const HEADER = `import { workflow } from "@aflow/dsl";
+export const wf = workflow({
+  client_id: "acme",
+  name: "tiny",
+  schemas: { acme: "./acme.json" },
+  input: "acme.In",
+  result: "acme.Out",
+  items: { order: { data: "input", parent: null } },
+});
+`;
+const SCHEMA = JSON.stringify({ definitions: { In: { type: "object" }, Out: { type: "object" } } });
+
+describe("buildWorkflow — the booking workflow in the DSL", () => {
+  const built = buildWorkflow(entry);
+
+  it("has no diagnostics", () => {
+    expect(built.diagnostics).toEqual([]);
+  });
+
+  it("builds the JSON fixture, expression whitespace aside", () => {
+    expect(normalise(built.definition)).toEqual(normalise(bookingWorkflow));
+  });
+
+  it("keeps the source location of every task", () => {
+    expect(built.locations?.tasks.hold_hotel_room).toMatchObject({ file: join(booking, "hotel.ts") });
+    expect(Object.keys(built.locations?.tasks ?? {})).toHaveLength(bookingWorkflow.tasks.length);
+  });
+});
+
+describe("buildWorkflow — problems are diagnostics, never throws", () => {
+  it("reports an entry file that does not exist", () => {
+    const r = buildWorkflow(join(tmp, "nope.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.locations).toBeNull();
+    expect(r.diagnostics).toHaveLength(1);
+    expect(r.diagnostics[0]).toMatchObject({ severity: "error" });
+  });
+
+  it("reports an entry file that assembles no workflow", () => {
+    const dir = project("no-assembly", { "header.ts": HEADER, "acme.json": SCHEMA });
+    const r = buildWorkflow(join(dir, "header.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.map((d) => d.rule)).toEqual(["not-static"]);
+  });
+
+  it("reports schema errors at the header", () => {
+    const dir = project("bad-schema", {
+      "header.ts": HEADER.replace('result: "acme.Out"', 'result: "acme.Missing"'),
+      "acme.json": SCHEMA,
+      "entry.ts": `import { wf } from "./header";
+const g = wf.tasks({ Input: { item: "order", route: null } });
+export default wf.assemble(g);
+`,
+    });
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.map((d) => [d.rule, d.file])).toEqual([["schema", join(dir, "header.ts")]]);
+    expect(r.diagnostics[0]!.message).toContain("acme.Missing");
+  });
+
+  it("merges the schema closure into definitions", () => {
+    const dir = project("tiny", {
+      "header.ts": HEADER,
+      "acme.json": SCHEMA,
+      "entry.ts": `import { wf } from "./header";
+const g = wf.tasks({ Input: { item: "order", route: null } });
+export default wf.assemble(g);
+`,
+    });
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.diagnostics).toEqual([]);
+    expect(r.definition?.definitions).toEqual({
+      input: { $ref: "#/definitions/acme.In" },
+      result: { $ref: "#/definitions/acme.Out" },
+      "acme.In": { type: "object" },
+      "acme.Out": { type: "object" },
+    });
+  });
+});
+
+describe("generateTypes", () => {
+  it("writes the registry next to the header, and only when it changed", () => {
+    const dir = project("types", { "header.ts": HEADER, "acme.json": SCHEMA });
+    const out = join(dir, ".aflow", "types", "acme.tiny.d.ts");
+    const first = generateTypes(join(dir, "tsconfig.json"));
+    expect(first).toEqual({ written: [out], diagnostics: [] });
+    expect(readFileSync(out, "utf8")).toContain('"acme.In": { [k: string]: unknown };');
+    const mtime = statSync(out).mtimeMs;
+    expect(generateTypes(join(dir, "tsconfig.json"))).toEqual({ written: [], diagnostics: [] });
+    expect(statSync(out).mtimeMs).toBe(mtime);
+  });
+
+  it("types the booking fixture: it type-checks against its generated registry", () => {
+    // The global setup ran `generateTypes` on the fixture project.
+    const config = ts.getParsedCommandLineOfConfigFile(join(booking, "tsconfig.json"), {}, {
+      ...ts.sys,
+      onUnRecoverableConfigFileDiagnostic: () => {},
+    })!;
+    expect(config.fileNames).toContain(join(booking, ".aflow", "types", "travelco.book_travel_order.d.ts"));
+    const program = ts.createProgram(config.fileNames, config.options);
+    const errors = ts
+      .getPreEmitDiagnostics(program)
+      .map((d) => `${d.file?.fileName}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("the aflow CLI", () => {
+  beforeAll(() => {
+    // CLAUDE.md: at most 2 processors for builds.
+    execFileSync("npm", ["run", "build", "-w", "@aflow/dsl"], {
+      cwd: repo,
+      stdio: "pipe",
+      env: { ...process.env, GOMAXPROCS: "2" },
+    });
+  }, 60_000);
+
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: repo, encoding: "utf8" });
+
+  it("builds the booking fixture: exit 0, the document on stdout", () => {
+    const r = run("build", entry);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(normalise(JSON.parse(r.stdout))).toEqual(normalise(bookingWorkflow));
+  });
+
+  it("writes the document to -o", () => {
+    const out = join(tmp, "booking.json");
+    const r = run("build", entry, "-o", out);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(JSON.parse(readFileSync(out, "utf8")).tasks).toHaveLength(bookingWorkflow.tasks.length);
+  });
+
+  it("fails on an unknown task: exit 1, the diagnostic on stderr", () => {
+    const dir = project("unknown-task", {
+      "header.ts": HEADER,
+      "acme.json": SCHEMA,
+      "entry.ts": `import { wf } from "./header";
+const g = wf.tasks({ Input: { item: "order", route: "nowhere" } });
+export default wf.assemble(g);
+`,
+    });
+    const r = run("build", join(dir, "entry.ts"));
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(/entry\.ts:2:\d+ {2}error {2}unknown-task {2}/);
+  });
+
+  it("generates types for a project", () => {
+    const dir = project("cli-types", { "header.ts": HEADER, "acme.json": SCHEMA });
+    const r = run("types", "--project", join(dir, "tsconfig.json"));
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(readFileSync(join(dir, ".aflow", "types", "acme.tiny.d.ts"), "utf8")).toContain("SchemaRegistry");
+  });
+
+  it("rejects an unknown command with exit 1", () => {
+    const r = run("frobnicate");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("usage");
+  });
+});

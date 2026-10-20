@@ -8,11 +8,10 @@
 
 import type { JsonSchema } from "../surface/header.js";
 import type { SchemaSet } from "./load.js";
+import { keyOfRef } from "./ref.js";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-
-const DEFINITIONS_PREFIX = "#/definitions/";
 const lit = (v: unknown): string => JSON.stringify(v) ?? "unknown";
 /** A literal type; only string, finite number, boolean and null are valid TS literal types. */
 const primLit = (v: unknown): string =>
@@ -60,9 +59,8 @@ function render(schema: unknown): string {
   if (!isObj(schema)) return "unknown";
   const s = schema;
 
-  if (typeof s.$ref === "string" && s.$ref.startsWith(DEFINITIONS_PREFIX)) {
-    return `SchemaRegistry[${lit(s.$ref.slice(DEFINITIONS_PREFIX.length))}]`;
-  }
+  const key = typeof s.$ref === "string" ? keyOfRef(s.$ref) : undefined;
+  if (key !== undefined) return `SchemaRegistry[${lit(key)}]`;
   if ("const" in s) return primLit(s.const);
   if (Array.isArray(s.enum)) return s.enum.length ? [...new Set(s.enum.map(primLit))].join(" | ") : "never";
 

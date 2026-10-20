@@ -171,4 +171,11 @@ const v: string = w['a"b\\\\c'];
 `;
     expect(check(generateRegistry(s), probe)).toEqual([]);
   });
+
+  it("decodes escaped $ref keys into registry keys (R18)", () => {
+    const s = loadSchemas([
+      { namespace: "q", inline: { Ref: { $ref: "#/definitions/we~1ird" }, "we/ird": { type: "string" } } },
+    ]);
+    expect(generateRegistry(s)).toContain('"q.Ref": SchemaRegistry["q.we/ird"];');
+  });
 });

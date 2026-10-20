@@ -11,6 +11,7 @@
 import type { Node, WorkflowDefinition } from "@aflow/engine";
 import type * as TS from "typescript";
 
+import { refOfKey } from "../schema/ref.js";
 import type { WorkflowHeader } from "../surface/header.js";
 import { type Position, SCOPE_AT, STATEMENT_POSITIONS } from "../surface/scope.js";
 import { checkBoundary } from "./boundary.js";
@@ -81,7 +82,7 @@ const ERROR_HANDLER: Position = "config.defaults.task.default_error_handler";
 
 const escapePointer = (s: string | number) => String(s).replace(/~/g, "~0").replace(/\//g, "~1");
 const pointerOf = (path: LiteralPath) => path.map((p) => `/${escapePointer(p)}`).join("");
-const refTo = (key: string) => ({ $ref: `#/definitions/${escapePointer(key)}` });
+const refTo = (key: string) => ({ $ref: refOfKey(key) });
 
 function locOf(node: TS.Node): Loc {
   const sf = node.getSourceFile();
