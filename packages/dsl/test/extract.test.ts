@@ -1,7 +1,7 @@
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { analyzeProgram, arrowsOf } from "../src/analyzer/index.js";
-import { RULE_CODES } from "../src/analyzer/diagnostics.js";
+import { type AflowDiagnostic, RULE_CODES } from "../src/analyzer/diagnostics.js";
 import { emitArrow, emitScript } from "../src/analyzer/emit.js";
 import { evaluateLiteral } from "../src/analyzer/literal.js";
 import { MEM, programOf, typeErrors } from "./helpers.js";
@@ -352,6 +352,12 @@ export default wf.assemble(g);
     ]);
   });
 
+  it("a construct that type erasure cannot remove is not-static (R19)", () => {
+    const program = withTask(`enrich: ({ objects }) => { enum E { A } objects.e = E.A; }`);
+    const { a } = only(program);
+    expect(a.diagnostics.map((d) => [d.rule, textAt(program, d)])).toEqual([["not-static", "enum E { A }"]]);
+  });
+
   it("a block body at a statement position is fine", () => {
     const { a, wf } = only(withTask(`enrich: ({ objects }) => {\n    objects.a = 1;\n  }`));
     expect(a.diagnostics).toEqual([]);
@@ -389,8 +395,64 @@ describe("emitArrow / emitScript", () => {
     });
   });
 
-  it("types are erased", () => {
-    expect(emitArrow(ts, arrowIn(`f(({ data }: S) => (data as any).x!)`))).toEqual({ $expr: "data.x" });
+  it("types are erased by deleting their spans; parentheses stay (R19)", () => {
+    expect(emitArrow(ts, arrowIn(`f(({ data }: S) => (data as any).x!)`))).toEqual({ $expr: "(data).x" });
+    expect(emitArrow(ts, arrowIn(`f(({ data }) => (data.a as any) * (data.b + 1 as number))`))).toEqual({
+      $expr: "(data.a) * (data.b + 1)",
+    });
+  });
+
+  it("spacing and line breaks are verbatim (R19)", () => {
+    expect(emitArrow(ts, arrowIn(`f(({ a, b }) => a  ===   b)`))).toEqual({ $expr: "a  ===   b" });
+    const chain = [
+      "root.objects.all_reserved",
+      "  // Every line reserved: commit",
+      "  ? (type === 'hotel_line' ? 'commit' : 'confirm')",
+      "  : (target_state === 'success'",
+      "      ? 'release'",
+      "      : 'abandon')",
+    ].join("\n");
+    expect(emitArrow(ts, arrowIn(`f(({ root, type, target_state }) =>\n  ${chain})`))).toEqual({ $expr: chain });
+  });
+
+  it("erases annotations, assertions, type arguments, type parameters and type declarations", () => {
+    const arrow = arrowIn(`
+      f(({ data, objects }) => {
+        type Row = { id: string };
+        interface Ignored { x: number }
+        const rows: Row[] = data.rows as Row[];
+        let n!: number;
+        const pick = <T,>(xs: T[], i?: number): T => xs[i ?? 0]!;
+        objects.first = pick<Row>(rows);
+        objects.m = new Map<string, Row>();
+        objects.c = (<any>data).c satisfies unknown;
+        function g(this: void, y: number): number { return y; }
+      })`);
+    expect(emitArrow(ts, arrow)).toEqual({
+      $do: [
+        "const rows = data.rows;",
+        "let n;",
+        "const pick = (xs, i) => xs[i ?? 0];",
+        "objects.first = pick(rows);",
+        "objects.m = new Map();",
+        "objects.c = (data).c;",
+        "function g(y) { return y; }",
+      ].join("\n"),
+    });
+  });
+
+  it("an `enum`, a `namespace`, a parameter property or a decorator in an expression is not-static", () => {
+    for (const body of [
+      "enum E { A }",
+      "namespace N { export const a = 1; }",
+      "class C { constructor(private x: number) {} }",
+      "class D { @dec m() {} }",
+    ]) {
+      const diagnostics: AflowDiagnostic[] = [];
+      emitArrow(ts, arrowIn(`f(({ objects }) => { ${body} })`), diagnostics);
+      expect(diagnostics.map((d) => d.rule), body).toEqual(["not-static"]);
+      expect(diagnostics[0]!.message).toMatch(/not allowed in expressions/);
+    }
   });
 
   it("a block body becomes `$do` without braces and common indentation", () => {
@@ -403,8 +465,13 @@ describe("emitArrow / emitScript", () => {
         }
       })`);
     expect(emitArrow(ts, arrow)).toEqual({
-      $do: "objects.a = data.x; // keep me\nif (data.y) {\n    objects.b = `multi\n  line`;\n}",
+      $do: "objects.a = data.x; // keep me\nif (data.y) {\n  objects.b = `multi\n  line`;\n}",
     });
+  });
+
+  it("keeps trailing spaces of a line that ends inside a template literal", () => {
+    const arrow = arrowIn("f(({ o }) => {\n  o.s = `abc   \n  def`;\n})");
+    expect(emitArrow(ts, arrow)).toEqual({ $do: "o.s = `abc   \n  def`;" });
   });
 
   it("a script is the full arrow text", () => {
@@ -414,16 +481,20 @@ describe("emitArrow / emitScript", () => {
     expect(emitScript(ts, arrowIn(`f(async (input: In, lib: any): Promise<unknown> => lib.x(input))`))).toBe(
       "async (input, lib) => lib.x(input)",
     );
+    expect(emitScript(ts, arrowIn(`f(async (input,   lib) =>\n  lib.x(input as any))`))).toBe(
+      "async (input,   lib) =>\n  lib.x(input)",
+    );
   });
 
   it("strings, quotes and templates that look like code are verbatim (Review Focus 1)", () => {
-    const arrow = arrowIn("f(({ data }) => data.s === \"a => {b}\" ? 'this' : `x`)");
-    expect(emitArrow(ts, arrow)).toEqual({ $expr: "data.s === \"a => {b}\" ? 'this' : `x`" });
+    const arrow = arrowIn("f(({ data }) => data.s === \"a => {b} as T!\" ? 'this' : `x<T>(y: Z)`)");
+    expect(emitArrow(ts, arrow)).toEqual({ $expr: "data.s === \"a => {b} as T!\" ? 'this' : `x<T>(y: Z)`" });
   });
 
   it("comments inside the body are kept", () => {
-    const arrow = arrowIn(`f(({ a }) => a\n  // pick b\n  ? 1 : 2)`);
-    expect((emitArrow(ts, arrow) as { $expr: string }).$expr).toContain("// pick b");
+    expect(emitArrow(ts, arrowIn(`f(({ a }) => a\n  // pick b\n  ? 1 : 2)`))).toEqual({
+      $expr: "a\n  // pick b\n  ? 1 : 2",
+    });
   });
 });
 

@@ -111,12 +111,12 @@ function arrowHandler(
     const record = () => exprs.push({ pointer: pointerOf(path), loc: locOf(arrow), arrow });
     if (base === "node" && path.join(".") === "call.script") {
       record();
-      return { value: emitScript(ts, arrow) };
+      return { value: emitScript(ts, arrow, diagnostics) };
     }
     const position = positionAt(path, base);
     if (!position) return null;
     record();
-    if (position === ERROR_HANDLER) return { value: emitStatements(ts, arrow) };
+    if (position === ERROR_HANDLER) return { value: emitStatements(ts, arrow, diagnostics) };
     if (ts.isBlock(arrow.body) && !(STATEMENT_POSITIONS as readonly string[]).includes(position)) {
       diagnostics.push(
         diagnosticAt(
@@ -126,7 +126,7 @@ function arrowHandler(
         ),
       );
     }
-    return { value: emitArrow(ts, arrow) };
+    return { value: emitArrow(ts, arrow, diagnostics) };
   };
 }
 
