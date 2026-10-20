@@ -12,6 +12,10 @@
     "./build": {
       "types": "./src/build.ts",
       "default": "./src/build.ts"
+    },
+    "./registry": {
+      "types": "./src/registry.ts",
+      "default": "./src/registry.ts"
     }
   },
   "bin": {

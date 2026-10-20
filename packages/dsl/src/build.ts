@@ -7,16 +7,18 @@
  * every problem is a diagnostic.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import type { WorkflowDefinition } from "@aflow/engine";
 import ts from "typescript";
 
 import { type AflowDiagnostic, sortedUnique } from "./analyzer/diagnostics.js";
 import { analyzeProgram, type SourceLocations, type WorkflowAnalysis } from "./analyzer/index.js";
-import { generateRegistry } from "./schema/codegen.js";
-import { closure, loadSchemas, type SchemaError, type SchemaSet, type SchemaSource } from "./schema/load.js";
+import { schemaDiagnostics, schemaSources, writeRegistryFor } from "./registry.js";
+import { closure, loadSchemas } from "./schema/load.js";
+
+export { writeRegistryFor };
 
 export interface BuildResult {
   /** The §13 document; `null` when any diagnostic is an error (§15.8). */
@@ -70,48 +72,6 @@ function parseConfig(configPath: string, diagnostics: AflowDiagnostic[]): ts.Par
   return parsed;
 }
 
-/** The header `workflow(…)` call of `wf`, for diagnostics that belong to the header as a whole. */
-function headerNode(program: ts.Program, wf: WorkflowAnalysis): ts.Node | undefined {
-  const sf = program.getSourceFile(wf.headerFile);
-  for (const stmt of sf?.statements ?? []) {
-    if (!ts.isVariableStatement(stmt)) continue;
-    for (const decl of stmt.declarationList.declarations) {
-      if (ts.isIdentifier(decl.name) && decl.name.text === wf.headerSymbol) return decl.initializer ?? decl;
-    }
-  }
-  return undefined;
-}
-
-/** Schema errors as `schema` diagnostics at the header (§15.8). */
-function schemaDiagnostics(program: ts.Program, wf: WorkflowAnalysis, errors: SchemaError[]): AflowDiagnostic[] {
-  const node = headerNode(program, wf);
-  const sf = node?.getSourceFile();
-  const start = node && sf ? node.getStart(sf) : 0;
-  const length = node ? node.getEnd() - start : 0;
-  return errors.map((e) => ({
-    rule: "schema" as const,
-    severity: "error" as const,
-    message: e.file && !e.message.includes(e.file) ? `${e.message} (${e.file})` : e.message,
-    file: wf.headerFile,
-    start,
-    length,
-  }));
-}
-
-/** The schema sources of a header: `schemas` files relative to the header file, and inline `types` (§15.2). */
-function schemaSources(wf: WorkflowAnalysis): SchemaSource[] {
-  const { header } = wf;
-  const sources: SchemaSource[] = [];
-  const dir = dirname(wf.headerFile);
-  for (const [namespace, path] of Object.entries(header.schemas ?? {})) {
-    if (typeof path === "string") sources.push({ namespace, file: resolve(dir, path) });
-  }
-  if (header.types !== undefined && typeof header.client_id === "string") {
-    sources.push({ namespace: header.client_id, inline: { ...header.types } });
-  }
-  return sources;
-}
-
 /** The schema keys the document names: `input`, `result`, item types, `call.output` types (§10). */
 function schemaRoots(wf: WorkflowAnalysis): string[] {
   const roots = new Set<string>();
@@ -163,7 +123,7 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
   diagnostics.push(...wf.diagnostics);
   const set = loadSchemas(schemaSources(wf));
   const { schemas, errors } = closure(set, schemaRoots(wf));
-  diagnostics.push(...schemaDiagnostics(program, wf, [...set.errors, ...errors]));
+  diagnostics.push(...schemaDiagnostics(ts, program, wf, [...set.errors, ...errors]));
 
   const all = sortedUnique(diagnostics);
   const definition: WorkflowDefinition = {
@@ -175,21 +135,6 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
     diagnostics: all,
     locations: wf.locations,
   };
-}
-
-/** The registry file of a header: `<header dir>/.aflow/types/<client_id>.<name>.d.ts` (§15.7). */
-function registryPath(wf: WorkflowAnalysis): string | null {
-  const { client_id, name } = wf.header;
-  if (typeof client_id !== "string" || typeof name !== "string") return null;
-  return join(dirname(wf.headerFile), ".aflow", "types", `${client_id}.${name}.d.ts`);
-}
-
-/** Writes `text` to `path` unless the file already holds it. True when it wrote. */
-function writeIfChanged(path: string, text: string): boolean {
-  if (existsSync(path) && readFileSync(path, "utf8") === text) return false;
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, text);
-  return true;
 }
 
 /**
@@ -214,15 +159,9 @@ export function generateTypes(project: string): { written: string[]; diagnostics
     const key = `${wf.headerFile}\0${wf.headerSymbol}`;
     if (done.has(key)) continue;
     done.add(key);
-    const path = registryPath(wf);
-    if (!path) continue;
-    const set: SchemaSet = loadSchemas(schemaSources(wf));
-    diagnostics.push(...schemaDiagnostics(program, wf, set.errors));
-    try {
-      if (writeIfChanged(path, generateRegistry(set))) written.push(path);
-    } catch (e) {
-      diagnostics.push(...schemaDiagnostics(program, wf, [{ kind: "unreadable", message: `cannot write ${path}: ${(e as Error).message}` }]));
-    }
+    const result = writeRegistryFor(ts, program, wf);
+    diagnostics.push(...result.diagnostics);
+    if (result.written) written.push(result.written);
   }
   return { written, diagnostics: sortedUnique(diagnostics) };
 }

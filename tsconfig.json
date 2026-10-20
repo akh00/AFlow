@@ -28,5 +28,10 @@
     "packages/*/test/**/*.ts",
     "**/.aflow/types/*.d.ts"
   ],
-  "exclude": ["dist", "node_modules", "packages/*/test/fixtures/**"]
+  "exclude": [
+    "dist",
+    "node_modules",
+    "packages/*/test/fixtures/**",
+    "packages/ts-plugin/src/index.ts"
+  ]
 }
