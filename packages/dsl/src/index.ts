@@ -75,3 +75,7 @@ export type {
 export type { NodeFields, NodeSpec, RouteSpec } from "./surface/node.js";
 export { SCOPE_AT, STATEMENT_POSITIONS } from "./surface/scope.js";
 export type { Position, ScopeAt, ScopeName } from "./surface/scope.js";
+export { analyzeProgram } from "./analyzer/index.js";
+export type { Analysis, Loc, SourceLocations, WorkflowAnalysis } from "./analyzer/index.js";
+export { RULE_CODES } from "./analyzer/diagnostics.js";
+export type { AflowDiagnostic, RuleId } from "./analyzer/diagnostics.js";
