@@ -14,20 +14,28 @@ import type { BodyKind, RetryConfig } from "@aflow/engine";
 import type {
   ChildOrAnyName,
   ItemName,
+  Registered,
   SchemaKey,
   WorkflowHeader,
 } from "./header.js";
 import type { Position, ScopeAt, ScopeOver, Selection } from "./scope.js";
 
 /** A value position: an expression body yielding `R` (§15.4). */
-type Value<P extends Position, H extends WorkflowHeader, I extends ItemName<H>, R = unknown> = (
-  scope: ScopeAt<P, H, I>,
-) => R;
+type Value<
+  P extends Position,
+  H extends WorkflowHeader,
+  I extends ItemName<H>,
+  R = unknown,
+  Res = unknown,
+> = (scope: ScopeAt<P, H, I, Res>) => R;
 
 /** A statement position: either body form (§15.4). */
-type Statement<P extends Position, H extends WorkflowHeader, I extends ItemName<H>> = (
-  scope: ScopeAt<P, H, I>,
-) => void;
+type Statement<
+  P extends Position,
+  H extends WorkflowHeader,
+  I extends ItemName<H>,
+  Res = unknown,
+> = (scope: ScopeAt<P, H, I, Res>) => void;
 
 /**
  * §4 route phase: a task name, `null` (ends the branch), an expression
@@ -116,25 +124,26 @@ export interface DispatchSpec<H extends WorkflowHeader, I extends ItemName<H>> {
   route: RouteSpec<ScopeOver<"dispatch.route", H, ChildOrAnyName<H, I>>>;
 }
 
-/**
- * §9 / §11 `call.output`.
- *
- * `result` is `unknown` here even when `result_type` is given: typing it from
- * the sibling literal needs a union discriminated by `result_type`, and
- * TypeScript cannot discriminate a contextual union by a *missing* property
- * when the union sits under an optional property (`output?`), so every
- * `output` without `result_type` would lose its parameter types instead.
- */
-export interface OutputSpec<H extends WorkflowHeader, I extends ItemName<H>> {
-  /** §9 — the result's `definitions` key. */
-  result_type?: SchemaKey;
+/** §9 / §11 `call.output` for result type `K`; `result` is `SchemaRegistry[K]`. */
+export interface OutputFields<H extends WorkflowHeader, I extends ItemName<H>, K> {
+  /** §9 / §15.4 — the result's `definitions` key. Required in the DSL: it types `result` in `transform` / `enrich`. */
+  result_type: K;
   /** §9 — the error's `definitions` key. */
   error_type?: SchemaKey;
   /** §11 — pure; MAY turn a successful response into an error to trigger a retry. Runs before `enrich`. */
-  transform?: Value<"call.output.transform", H, I>;
+  transform?: Value<"call.output.transform", H, I, unknown, Registered<K>>;
   /** §9 — pure statement block folding `result` into `this`. */
-  enrich?: Statement<"call.output.enrich", H, I>;
+  enrich?: Statement<"call.output.enrich", H, I, Registered<K>>;
 }
+
+/**
+ * §9 / §15.4 `call.output`, discriminated by `result_type`, which the DSL
+ * requires (there is no untyped variant: TypeScript cannot narrow by a missing
+ * discriminant under the optional `output`).
+ */
+export type OutputSpec<H extends WorkflowHeader, I extends ItemName<H>> = {
+  [K in SchemaKey]: OutputFields<H, I, K>;
+}[SchemaKey];
 
 /** §9 `call` — the only body kind that performs I/O; its result is captured. */
 export interface CallSpec<H extends WorkflowHeader, I extends ItemName<H>> {

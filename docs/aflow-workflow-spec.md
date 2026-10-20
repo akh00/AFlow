@@ -831,10 +831,25 @@ enrich: ({ objects, data }) => { objects.total = data.order_lines.length; },
 The parameter's type contains exactly the names valid at the position, typed for the
 node's item type: `data`/`objects` from the item declaration's schema keys (§10),
 `parent` and `root` from the item tree (§3), `items` as the union of the child item
-types (discriminated by `type`), `set` from what `select` returns, `parameters` from
-`config.parameters`. In `split.item_type`, `data` is the element the selector
-produced for this child (typed from the selector's return element type) and `index`
-is a `number`. An arrow that reads no scope name writes `({}) => …`.
+types (discriminated by `type`), `parameters` from `config.parameters`, and
+`result` from `call.output.result_type`. In the DSL, `call.output` MUST declare
+`result_type`; `result` in `call.output.transform` / `call.output.enrich` is typed
+from it. In `split.item_type`, `index` is a `number`. An arrow that reads no scope
+name writes `({}) => …`.
+
+Three positions are typed more loosely than the runtime binds them, because an
+arrow's parameter type cannot depend on a sibling arrow or on the header being
+declared. This is a limit of static typing only; what the engine binds at runtime
+(§7, §19 E1) is unchanged:
+
+- `set` is typed as the views of the node item's declared child types (every item
+  type when it declares none), not from what `select` returns;
+- `data` in `split.item_type` is typed as the union of the child types' `data`
+  (each selector element becomes a child's `data`, §6.3), not from the selector's
+  return element type;
+- the `config` expression positions (`default_target_state_setter`,
+  `default_error_handler`, `task.route`) use a header-independent scope: `data` is
+  `unknown`, item views are open (any declared type), and `parameters` is a record.
 
 Inside the arrow:
 
@@ -995,6 +1010,7 @@ export const wf = workflow({
     FlightLineData:    { type: "object" },
     FlightLineObjects: { type: "object" },
     HotelRecord:       { type: "object" },
+    HotelHold:         { type: "object" },
   },
   input:  "travelco.BookingRequest",
   result: "travelco.BookingResponse",
@@ -1108,7 +1124,10 @@ export const hotel_tasks = wf.tasks({
       implementation: { bundle_name: "hotel-supplier", bundle_version: "2.1.0" },
       input: ({ objects, data, root }) => ({ record_id: objects.record_id, line: data, payment: root.objects.payment }),
       script: async (input, lib) => await lib.hold(input),
-      output: { enrich: ({ objects, result }) => { objects.hold_id = result.hold_id; } },
+      output: {
+        result_type: "travelco.HotelHold",
+        enrich: ({ objects, result }) => { objects.hold_id = result.hold_id; },
+      },
     },
     target_state_setter: ({ task_state }) => task_state.status === "success" ? "success" : "failure",
     route: "mark_hotel_reserved",
@@ -1137,12 +1156,13 @@ export default wf.assemble(order_tasks, hotel_tasks, flight_tasks);
             "implementation": { "bundle_name": "hotel-supplier", "bundle_version": "2.1.0" },
             "input":  { "$expr": "({ record_id: objects.record_id, line: data, payment: root.objects.payment })" },
             "script": "async (input, lib) => await lib.hold(input)",     // full arrow text
-            "output": { "enrich": { "$do": "objects.hold_id = result.hold_id;" } } },  // block body, braces dropped
+            "output": { "result_type": "travelco.HotelHold",
+                        "enrich": { "$do": "objects.hold_id = result.hold_id;" } } },  // block body, braces dropped
   "target_state_setter": { "$expr": "task_state.status === \"success\" ? \"success\" : \"failure\"" },
   "route": "mark_hotel_reserved" }
 ```
 
-and `definitions` holding `input`, `result`, the six inline `travelco.*` types and
+and `definitions` holding `input`, `result`, the seven inline `travelco.*` types and
 the closure of `travelco.BookingRequest` / `travelco.BookingResponse` from
 `schemas/travelco.json` (including `travelco.PaymentInstrument`, reached by `$ref`).
 Task order in `tasks` is `order_tasks`, then `hotel_tasks`, then `flight_tasks`,

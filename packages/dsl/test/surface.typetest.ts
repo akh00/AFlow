@@ -199,8 +199,10 @@ export const line_tasks = wf.tasks({
       script: async (input, lib) => await lib.hold(input),
       output: {
         result_type: "t.Hold",
+        // `result` is typed from `result_type` (§15.4).
+        transform: ({ result }) => (result.hold_id === "" ? { error: { code: 503 } } : result),
         enrich: ({ objects, result }) => {
-          objects.hold_id = (result as { hold_id: string }).hold_id;
+          objects.hold_id = result.hold_id;
         },
       },
     },
@@ -208,18 +210,27 @@ export const line_tasks = wf.tasks({
     route: "commit_line",
   },
 
-  // `result` is `unknown`, with or without `result_type` (see OutputSpec).
-  untyped_result: {
+  wrong_result_field: {
     item: "line",
     call: {
       provider: "http",
       request: { method: "GET", url: ({ parameters }) => `https://x/${parameters.limit}` },
       output: {
+        result_type: "t.Hold",
         enrich: ({ objects, result }) => {
-          // @ts-expect-error — `result` is `unknown`
-          objects.hold_id = result.hold_id;
+          // @ts-expect-error — `nope` is not a field of t.Hold
+          objects.hold_id = result.nope;
         },
       },
+    },
+  },
+
+  output_without_result_type: {
+    item: "line",
+    call: {
+      provider: "http",
+      // @ts-expect-error — the DSL requires `call.output.result_type` (§15.4)
+      output: { error_type: "t.Res" },
     },
   },
 

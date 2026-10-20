@@ -127,7 +127,7 @@ export const STATEMENT_POSITIONS = [
 export type ScopeName<P extends Position> = (typeof SCOPE_AT)[P][number];
 
 /** Every member an item-bound scope can carry, typed for item type `I`. */
-export interface ScopeMembers<H extends WorkflowHeader, I extends ItemName<H>, E> {
+export interface ScopeMembers<H extends WorkflowHeader, I extends ItemName<H>, R, E> {
   /** The item's id. */
   id: string;
   /** The item type (§3) — the discriminant of `items` and `set` members. */
@@ -161,8 +161,8 @@ export interface ScopeMembers<H extends WorkflowHeader, I extends ItemName<H>, E
   self: ItemViewOf<H, I>;
   /** §7 — the selected set. `until` MUST be monotonic; `reduce` MUST be commutative and associative. */
   set: SetOf<H, I>;
-  /** §9 — the captured call result; in `target_state_setter`, the task's recorded result. */
-  result: unknown;
+  /** §9 — the captured call result, typed from `call.output.result_type`; in `target_state_setter`, the task's recorded result. */
+  result: R;
   /** §9 — the value `call.input` computed. */
   input: unknown;
   /** §3 — the record of this node's visit. */
@@ -193,17 +193,20 @@ export interface ProspectiveMembers<H extends WorkflowHeader, I extends ItemName
 type ErrorAt<P extends Position> =
   P extends "config.defaults.task.default_error_handler" ? WorkflowError : WorkflowError | null;
 
-type MembersAt<P extends Position, H extends WorkflowHeader, I extends ItemName<H>> =
-  P extends "split.item_type" ? ProspectiveMembers<H, I> : ScopeMembers<H, I, ErrorAt<P>>;
+type MembersAt<P extends Position, H extends WorkflowHeader, I extends ItemName<H>, R> =
+  P extends "split.item_type" ? ProspectiveMembers<H, I> : ScopeMembers<H, I, R, ErrorAt<P>>;
 
 /**
  * The parameter type of an arrow at position `P` on a node bound to item type
- * `I`: exactly the names `SCOPE_AT[P]` lists.
+ * `I`: exactly the names `SCOPE_AT[P]` lists. `R` types `result` (in
+ * `call.output.*`, the registered type of `result_type`).
  */
-export type ScopeAt<P extends Position, H extends WorkflowHeader, I extends ItemName<H>> = Pick<
-  MembersAt<P, H, I>,
-  ScopeName<P> & keyof MembersAt<P, H, I>
->;
+export type ScopeAt<
+  P extends Position,
+  H extends WorkflowHeader,
+  I extends ItemName<H>,
+  R = unknown,
+> = Pick<MembersAt<P, H, I, R>, ScopeName<P> & keyof MembersAt<P, H, I, R>>;
 
 /** `ScopeAt` distributed over several item types — a union of scopes, discriminated by `type`. */
 export type ScopeOver<P extends Position, H extends WorkflowHeader, Is extends ItemName<H>> =
@@ -215,7 +218,7 @@ export type Selection<H extends WorkflowHeader> = readonly (AnyView<H> | ItemVie
 // Every name in `SCOPE_AT` has a type above; a new name without one fails here.
 type Untyped = Exclude<
   ScopeName<Position>,
-  keyof ScopeMembers<WorkflowHeader, string, unknown> | keyof ProspectiveMembers<WorkflowHeader, string>
+  keyof ScopeMembers<WorkflowHeader, string, unknown, unknown> | keyof ProspectiveMembers<WorkflowHeader, string>
 >;
 type AllNamesTyped = Expect<[Untyped] extends [never] ? true : false>;
 type Expect<T extends true> = T;
