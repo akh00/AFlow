@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { buildWorkflow } from "../packages/dsl/src/build.js";
+import { buildWorkflow } from "@aflow/dsl/build";
 import { evaluate } from "../src/index.js";
 import type { Evaluation, TrajectoryEntry } from "../src/runtime.js";
 import type { WorkflowDefinition } from "../src/types.js";

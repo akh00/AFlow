@@ -14,20 +14,17 @@ export const wf = workflow({
   types: {
     OrderObjects: {
       type: "object",
-      required: ["payment"],
       properties: { payment: { $ref: "#/definitions/PaymentInstrument" } },
     },
     HotelLineData: { $ref: "#/definitions/OrderLine" },
     // `phase` is what the barriers wait on (§7).
     HotelLineObjects: {
       type: "object",
-      required: ["phase"],
       properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
     },
     FlightLineData: { $ref: "#/definitions/OrderLine" },
     FlightLineObjects: {
       type: "object",
-      required: ["phase"],
       properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
     },
     // Supplier results, one per call (§9).

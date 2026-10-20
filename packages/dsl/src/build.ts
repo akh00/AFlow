@@ -48,13 +48,14 @@ function fileDiagnostic(file: string, rule: AflowDiagnostic["rule"], message: st
 function parseConfig(configPath: string, diagnostics: AflowDiagnostic[]): ts.ParsedCommandLine | null {
   const report = (d: ts.Diagnostic) => {
     if (d.code === NO_INPUTS) return;
-    diagnostics.push(
-      fileDiagnostic(
-        d.file?.fileName ?? configPath,
-        "not-static",
-        `tsconfig: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`,
-      ),
-    );
+    diagnostics.push({
+      rule: "project-config",
+      severity: "error",
+      message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+      file: d.file?.fileName ?? configPath,
+      start: d.start ?? 0,
+      length: d.length ?? 0,
+    });
   };
   let fatal = false;
   const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
@@ -140,7 +141,7 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
   const diagnostics: AflowDiagnostic[] = [];
   const fail = (): BuildResult => ({ definition: null, diagnostics: sortedUnique(diagnostics), locations: null });
   if (!existsSync(file)) {
-    diagnostics.push(fileDiagnostic(file, "not-static", `The entry file ${file} does not exist.`));
+    diagnostics.push(fileDiagnostic(file, "no-entry", `The entry file ${file} does not exist.`));
     return fail();
   }
 
@@ -152,7 +153,7 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
     diagnostics.push(
       fileDiagnostic(
         file,
-        "not-static",
+        "no-entry",
         "The entry file assembles no workflow. Write `export default wf.assemble(…)` in it (§15.1).",
       ),
     );
@@ -200,7 +201,7 @@ export function generateTypes(project: string): { written: string[]; diagnostics
   const diagnostics: AflowDiagnostic[] = [];
   const written: string[] = [];
   if (!existsSync(configPath)) {
-    diagnostics.push(fileDiagnostic(configPath, "not-static", `The project ${configPath} does not exist.`));
+    diagnostics.push(fileDiagnostic(configPath, "project-config", `The project ${configPath} does not exist.`));
     return { written, diagnostics };
   }
   const parsed = parseConfig(configPath, diagnostics);

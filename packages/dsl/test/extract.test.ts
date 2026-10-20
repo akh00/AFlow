@@ -300,6 +300,8 @@ describe("analyzeProgram — diagnostics", () => {
     expect(RULE_CODES["not-static"]).toBe(77001);
     expect(RULE_CODES.schema).toBe(77015);
     expect(RULE_CODES["body-form"]).toBe(77016);
+    expect(RULE_CODES["no-entry"]).toBe(77017);
+    expect(RULE_CODES["project-config"]).toBe(77018);
   });
 
   it("`timeout: 2 * 1000` is not-static", () => {

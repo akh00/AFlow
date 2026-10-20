@@ -1004,13 +1004,19 @@ export const wf = workflow({
   version: "1.0.0",
   schemas: { travelco: "./schemas/travelco.json" },  // BookingRequest, BookingResponse, …
   types: {                                           // workflow-private → "travelco.<Name>"
-    OrderObjects:      { type: "object" },
-    HotelLineData:     { type: "object" },
-    HotelLineObjects:  { type: "object" },
-    FlightLineData:    { type: "object" },
-    FlightLineObjects: { type: "object" },
-    HotelRecord:       { type: "object" },
-    HotelHold:         { type: "object" },
+    OrderObjects:       { type: "object" },
+    HotelLineData:      { type: "object" },
+    HotelLineObjects:   { type: "object" },
+    FlightLineData:     { type: "object" },
+    FlightLineObjects:  { type: "object" },
+    // One result type for each call: `call.output` MUST declare `result_type` (§15.4).
+    HotelRecord:        { type: "object" },
+    HotelHold:          { type: "object" },
+    HotelConfirmation:  { type: "object" },
+    HotelRelease:       { type: "object" },
+    HotelDiscard:       { type: "object" },
+    FlightBooking:      { type: "object" },
+    FlightCancellation: { type: "object" },
   },
   input:  "travelco.BookingRequest",
   result: "travelco.BookingResponse",
@@ -1162,9 +1168,17 @@ export default wf.assemble(order_tasks, hotel_tasks, flight_tasks);
   "route": "mark_hotel_reserved" }
 ```
 
-and `definitions` holding `input`, `result`, the seven inline `travelco.*` types and
-the closure of `travelco.BookingRequest` / `travelco.BookingResponse` from
-`schemas/travelco.json` (including `travelco.PaymentInstrument`, reached by `$ref`).
+and `definitions` holding these keys:
+
+- `input` and `result`;
+- the 12 inline `travelco.*` types: the five item types (`OrderObjects`,
+  `HotelLineData`, `HotelLineObjects`, `FlightLineData`, `FlightLineObjects`) and the
+  seven call result types (`HotelRecord`, `HotelHold`, `HotelConfirmation`,
+  `HotelRelease`, `HotelDiscard`, `FlightBooking`, `FlightCancellation`);
+- the closure of `travelco.BookingRequest` / `travelco.BookingResponse` from
+  `schemas/travelco.json`. The closure includes `travelco.Customer`,
+  `travelco.OrderLine` and `travelco.PaymentInstrument`, which `$ref`s reach.
+
 Task order in `tasks` is `order_tasks`, then `hotel_tasks`, then `flight_tasks`,
 each in property order.
 

@@ -14,6 +14,6 @@ export default defineConfig({
     globalSetup: ["packages/dsl/test/global-setup.ts"],
     // CLAUDE.md: never more than 2 workers, leave headroom on the host.
     pool: "threads",
-    poolOptions: { threads: { minThreads: 1, maxThreads: 2 } },
+    maxWorkers: 2,
   },
 });

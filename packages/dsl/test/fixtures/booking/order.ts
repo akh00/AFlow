@@ -73,7 +73,7 @@ export const order_settlement = wf.tasks({
     item: "order",
     aggregate: {
       select: ({ items }) => items,
-      until: ({ set }) => set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase)),
+      until: ({ set }) => set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase ?? '')),
       reduce: ({ objects, set }) => {
         objects.settled = set.filter(i => i.objects.phase === 'settled').map(i => i.data.id);
         objects.rolled_back = set.filter(i => i.objects.phase === 'released').map(i => i.data.id);
@@ -94,8 +94,8 @@ export const order_settlement = wf.tasks({
             currency: data.currency,
             total: objects.lines_total,
             payment: {
-              instrument: objects.payment.type,
-              last4: objects.payment.token.slice(-4)
+              instrument: objects.payment?.type,
+              last4: objects.payment?.token.slice(-4)
             },
             bookings: items.map(i => ({
               order_line_id: i.data.id,

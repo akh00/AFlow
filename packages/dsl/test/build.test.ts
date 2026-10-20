@@ -90,20 +90,44 @@ describe("buildWorkflow — the booking workflow in the DSL", () => {
   });
 });
 
+describe("the JSON fixture's schemas describe the runtime state (§10, R26)", () => {
+  it("requires no objects member that the item does not have when it is created", () => {
+    const created = Object.keys(bookingWorkflow.config?.defaults?.item?.objects ?? {});
+    const defs = bookingWorkflow.definitions as Record<string, { required?: string[] }>;
+    for (const decl of Object.values(bookingWorkflow.items ?? {})) {
+      const ref = (decl.objects as { $ref?: string } | undefined)?.$ref;
+      const key = ref?.replace("#/definitions/", "");
+      const required = (key && defs[key]?.required) || [];
+      expect({ key, missing: required.filter((m) => !created.includes(m)) }).toEqual({ key, missing: [] });
+    }
+  });
+});
+
 describe("buildWorkflow — problems are diagnostics, never throws", () => {
   it("reports an entry file that does not exist", () => {
     const r = buildWorkflow(join(tmp, "nope.ts"));
     expect(r.definition).toBeNull();
     expect(r.locations).toBeNull();
     expect(r.diagnostics).toHaveLength(1);
-    expect(r.diagnostics[0]).toMatchObject({ severity: "error" });
+    expect(r.diagnostics[0]).toMatchObject({ rule: "no-entry", severity: "error" });
   });
 
   it("reports an entry file that assembles no workflow", () => {
     const dir = project("no-assembly", { "header.ts": HEADER, "acme.json": SCHEMA });
     const r = buildWorkflow(join(dir, "header.ts"));
     expect(r.definition).toBeNull();
-    expect(r.diagnostics.map((d) => d.rule)).toEqual(["not-static"]);
+    expect(r.diagnostics.map((d) => d.rule)).toEqual(["no-entry"]);
+  });
+
+  it("reports tsconfig errors as project-config, at their position (R21)", () => {
+    const dir = project("bad-config", { "header.ts": HEADER, "acme.json": SCHEMA });
+    const config = join(dir, "broken.json");
+    writeFileSync(config, '{\n  "compilerOptions": {\n    "target": "nope"\n  }\n}\n');
+    const r = buildWorkflow(join(dir, "header.ts"), { tsconfig: config });
+    const d = r.diagnostics.find((x) => x.file === config);
+    expect(d).toMatchObject({ rule: "project-config", severity: "error" });
+    expect(d!.start).toBeGreaterThan(0);
+    expect(d!.length).toBeGreaterThan(0);
   });
 
   it("reports schema errors at the header", () => {
@@ -142,6 +166,15 @@ export default wf.assemble(g);
 });
 
 describe("generateTypes", () => {
+  it("writes a registry for a header that no assembly lists yet", () => {
+    const dir = project("unassembled", {
+      "header.ts": `${HEADER}export const g = wf.tasks({ Input: { item: "order", route: null } });\n`,
+      "acme.json": SCHEMA,
+    });
+    const out = join(dir, ".aflow", "types", "acme.tiny.d.ts");
+    expect(generateTypes(join(dir, "tsconfig.json"))).toEqual({ written: [out], diagnostics: [] });
+  });
+
   it("writes the registry next to the header, and only when it changed", () => {
     const dir = project("types", { "header.ts": HEADER, "acme.json": SCHEMA });
     const out = join(dir, ".aflow", "types", "acme.tiny.d.ts");
@@ -179,6 +212,10 @@ describe("the aflow CLI", () => {
   }, 60_000);
 
   const run = (...args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: repo, encoding: "utf8" });
+
+  it("starts with a shebang, so the `aflow` bin runs directly", () => {
+    expect(readFileSync(cli, "utf8").split("\n")[0]).toBe("#!/usr/bin/env node");
+  });
 
   it("builds the booking fixture: exit 0, the document on stdout", () => {
     const r = run("build", entry);

@@ -24,6 +24,8 @@ const RULES = [
   "duplicate-task",
   "schema",
   "body-form",
+  "no-entry",
+  "project-config",
 ] as const;
 
 export type RuleId = (typeof RULES)[number];

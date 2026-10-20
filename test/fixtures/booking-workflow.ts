@@ -107,19 +107,16 @@ export const bookingWorkflow: WorkflowDefinition = {
     // Workflow-private types (in the DSL: the header's inline `types`).
     "travelco.OrderObjects": {
       type: "object",
-      required: ["payment"],
       properties: { payment: { $ref: "#/definitions/travelco.PaymentInstrument" } },
     },
     "travelco.HotelLineData": { $ref: "#/definitions/travelco.OrderLine" },
     "travelco.HotelLineObjects": {
       type: "object",
-      required: ["phase"],
       properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
     },
     "travelco.FlightLineData": { $ref: "#/definitions/travelco.OrderLine" },
     "travelco.FlightLineObjects": {
       type: "object",
-      required: ["phase"],
       properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
     },
     // Supplier results, one per call (§9).
@@ -491,7 +488,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         select: { $expr: "items" },
         until: {
           $expr:
-            "set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase))",
+            "set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase ?? ''))",
         },
         reduce: {
           $do: `
@@ -517,8 +514,8 @@ export const bookingWorkflow: WorkflowDefinition = {
             currency: data.currency,
             total: objects.lines_total,
             payment: {
-              instrument: objects.payment.type,
-              last4: objects.payment.token.slice(-4)
+              instrument: objects.payment?.type,
+              last4: objects.payment?.token.slice(-4)
             },
             bookings: items.map(i => ({
               order_line_id: i.data.id,

@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * The `aflow` command line (spec §15):
  *
