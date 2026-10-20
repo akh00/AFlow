@@ -122,4 +122,53 @@ const k: string = ({} as SchemaRegistry["m.Key"])["a.b-c"];
 `;
     expect(check(generateRegistry(s), probe)).toEqual([]);
   });
+
+  it("falls back to unknown for non-primitive literals and empty type arrays", () => {
+    const s = loadSchemas([
+      {
+        namespace: "e",
+        inline: {
+          ObjConst: { const: { a: 1 } },
+          ObjEnum: { enum: ["x", { a: 1 }, [1], 2, null, true] },
+          Empty: { type: "object", properties: { k: { type: [] } }, required: ["k"] },
+        },
+      },
+    ]);
+    const probe = `
+type Eq<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const ok = <T extends true>(): T | void => {};
+ok<Eq<SchemaRegistry["e.ObjConst"], unknown>>();
+ok<Eq<SchemaRegistry["e.ObjEnum"], unknown>>();
+ok<Eq<SchemaRegistry["e.Empty"]["k"], unknown>>();
+`;
+    expect(check(generateRegistry(s), probe)).toEqual([]);
+  });
+
+  it("handles cross-file ref cycles", () => {
+    const s = loadSchemas([
+      { namespace: "common", file: fx("common.json") },
+      { namespace: "other", file: fx("other.json") },
+    ]);
+    const probe = `
+declare const a: SchemaRegistry["common.PingA"];
+const x: unknown = a["b"]?.["a"]?.["b"];
+`;
+    expect(check(generateRegistry(s), probe)).toEqual([]);
+  });
+
+  it("quotes awkward property names and registry keys", () => {
+    const s = loadSchemas([
+      {
+        namespace: "q",
+        inline: {
+          "we/ird": { type: "object", properties: { 'a"b\\c': { type: "string" } }, required: ['a"b\\c'] },
+        },
+      },
+    ]);
+    const probe = `
+declare const w: SchemaRegistry["q.we/ird"];
+const v: string = w['a"b\\\\c'];
+`;
+    expect(check(generateRegistry(s), probe)).toEqual([]);
+  });
 });

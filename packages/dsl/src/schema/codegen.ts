@@ -14,6 +14,11 @@ const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !
 
 const DEFINITIONS_PREFIX = "#/definitions/";
 const lit = (v: unknown): string => JSON.stringify(v) ?? "unknown";
+/** A literal type; only string, finite number, boolean and null are valid TS literal types. */
+const primLit = (v: unknown): string =>
+  v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))
+    ? lit(v)
+    : "unknown";
 const paren = (t: string): string => (/[|&]/.test(t) ? `(${t})` : t);
 
 function ofType(type: string, s: Obj): string {
@@ -58,11 +63,12 @@ function render(schema: unknown): string {
   if (typeof s.$ref === "string" && s.$ref.startsWith(DEFINITIONS_PREFIX)) {
     return `SchemaRegistry[${lit(s.$ref.slice(DEFINITIONS_PREFIX.length))}]`;
   }
-  if ("const" in s) return lit(s.const);
-  if (Array.isArray(s.enum)) return s.enum.length ? [...new Set(s.enum.map(lit))].join(" | ") : "never";
+  if ("const" in s) return primLit(s.const);
+  if (Array.isArray(s.enum)) return s.enum.length ? [...new Set(s.enum.map(primLit))].join(" | ") : "never";
 
   const parts: string[] = [];
   if (typeof s.type === "string") parts.push(ofType(s.type, s));
+  else if (Array.isArray(s.type) && s.type.length === 0) parts.push("unknown");
   else if (Array.isArray(s.type)) parts.push(paren([...new Set(s.type.map((t) => ofType(String(t), s)))].join(" | ")));
   else if (isObj(s.properties)) parts.push(objectType(s));
 
