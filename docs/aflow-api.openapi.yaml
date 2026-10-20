@@ -761,15 +761,15 @@ components:
             Create child items of `this` (§6.3). `selector` returns an array;
             each element becomes one child's `data`.
 
-            `itemType` and `route` accept an expression evaluated once per
+            `item_type` and `route` accept an expression evaluated once per
             produced child (§19 E1), so one split can produce several item types
-            and send them down different paths. While `itemType` is evaluated the
+            and send them down different paths. While `item_type` is evaluated the
             child does not exist yet, so its scope is `data` (the selector
             element), `index`, `parent`, `root`, `parameters` and `ctx`.
           type: object
-          required: [itemType, selector]
+          required: [item_type, selector]
           properties:
-            itemType:
+            item_type:
               description: |
                 Item type of the produced children. A bare string is a literal
                 type name; the `$expr` form is evaluated per child (§19 E1).
@@ -844,7 +844,7 @@ components:
         - name: add_order_lines
           item: input
           split:
-            itemType: order_line
+            item_type: order_line
             selector: "objects.order.order_items.map(oi => ({ order_item_id: oi.id }))"
             route: enrich_order_line
             parallel: true
@@ -893,10 +893,10 @@ components:
             evaluated before `enrich`.
           type: object
           properties:
-            resultType:
+            result_type:
               type: string
               description: Type name in `definitions` the result is validated against.
-            errorType:
+            error_type:
               type: string
               description: Type name in `definitions` the error is validated against.
             enrich: { $ref: '#/components/schemas/Expr' }
@@ -944,7 +944,7 @@ components:
             method: POST
             url: "`${parameters['persistence.base-url']}/orders/${data.order_id}`"
             body: "objects.save_request"
-          output: { resultType: SaveResponse, errorType: Error }
+          output: { result_type: SaveResponse, error_type: Error }
 
     # ------------------------------------------------------------------
     # Registry listings

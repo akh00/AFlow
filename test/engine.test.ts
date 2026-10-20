@@ -7,7 +7,7 @@ import {
   evaluate,
   validateDefinition,
 } from "../src/index.js";
-import type { WorkflowDefinition } from "../src/types.js";
+import type { Node, WorkflowDefinition } from "../src/types.js";
 
 /** Minimal single-item-type workflow scaffold. */
 function wf(tasks: WorkflowDefinition["tasks"], extra: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
@@ -173,7 +173,7 @@ describe("split (§6.3)", () => {
         name: "Input",
         item: "input",
         split: {
-          itemType: "child",
+          item_type: "child",
           selector: { $expr: "data.parts.map((p, n) => ({ name: p, order: n }))" },
           route: "work",
           parallel,
@@ -258,7 +258,7 @@ describe("split (§6.3)", () => {
         item: "input",
         split: {
           // The selector reads the recorded effect result (§5), never a live call.
-          itemType: { $expr: "data.kind === 'room' ? 'child' : 'input'" },
+          item_type: { $expr: "data.kind === 'room' ? 'child' : 'input'" },
           selector: { $expr: "tasks.Input.result.offers" },
           route: "price",
           parallel: true,
@@ -317,7 +317,7 @@ describe("split (§6.3)", () => {
       {
         name: "Input",
         item: "input",
-        split: { itemType: "child", selector: { $expr: "data.parts" }, route: null },
+        split: { item_type: "child", selector: { $expr: "data.parts" }, route: null },
         route: null,
       },
     ]);
@@ -330,7 +330,7 @@ describe("split (§6.3)", () => {
         name: "Input",
         item: "input",
         split: {
-          itemType: { $expr: "'ghost'" },
+          item_type: { $expr: "'ghost'" },
           selector: { $expr: "[{}]" },
           route: null,
         },
@@ -713,7 +713,7 @@ describe("the [E3] ctx binding", () => {
         name: "Input",
         item: "input",
         split: {
-          itemType: "child",
+          item_type: "child",
           selector: { $expr: "[{ n: 1 }, { n: 2 }]" },
           route: "touch",
           parallel: true,
@@ -796,6 +796,31 @@ describe("definition validation (§16)", () => {
     ).toThrow(/carries 2 body kinds \(enrich, return\)/);
   });
 
+  it("rejects the pre-rename spelling split.itemType", () => {
+    expect(() =>
+      validateDefinition(
+        wf([
+          {
+            name: "Input",
+            item: "input",
+            split: { itemType: "child", selector: { $expr: "[]" }, route: null },
+          } as unknown as Node,
+        ]),
+      ),
+    ).toThrow(WorkflowDefinitionError);
+    expect(() =>
+      validateDefinition(
+        wf([
+          {
+            name: "Input",
+            item: "input",
+            split: { itemType: "child", selector: { $expr: "[]" }, route: null },
+          } as unknown as Node,
+        ]),
+      ),
+    ).toThrow(/item_type/);
+  });
+
   it("rejects duplicate node names and undeclared item types", () => {
     expect(() =>
       validateDefinition(
@@ -840,7 +865,7 @@ describe("blocked evaluations", () => {
       {
         name: "Input",
         item: "input",
-        split: { itemType: "child", selector: { $expr: "[{}]" }, route: null },
+        split: { item_type: "child", selector: { $expr: "[{}]" }, route: null },
         route: "join",
       },
       {

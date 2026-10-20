@@ -60,7 +60,7 @@ export interface SplitBody {
    * `[E1]` may be an expression evaluated once per child, with `this` bound to
    * the prospective child, so one split can produce several item types.
    */
-  itemType: string | { $expr: string };
+  item_type: string | { $expr: string };
   /** Pure expression returning an array; each element becomes a child's `data`. */
   selector: Expr;
   /**
@@ -89,8 +89,8 @@ export interface DispatchBody {
 export type CallProvider = "http" | "sub_workflow" | "js";
 
 export interface CallOutput {
-  resultType?: string;
-  errorType?: string;
+  result_type?: string;
+  error_type?: string;
   /**
    * Pure output transform (§11). Receives `result`; may return
    * `{ error: … }` to turn a successful response into a retryable error.

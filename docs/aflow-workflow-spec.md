@@ -320,7 +320,7 @@ child item's `data`. `parallel` runs the produced items concurrently (§8).
 ```jsonc
 { "name": "add_order_lines", "item": "input",
   "split": {
-    "itemType": "order_line",
+    "item_type": "order_line",
     "selector": { "$expr": "data.order_item_ids ? data.order_item_ids.map(id => ({order_item_id:id})) : objects.order.order_items.map(oi => ({order_item_id: oi.id}))" },
     "route": "enrich_order_line",
     "parallel": true
@@ -468,7 +468,7 @@ A `call` body is the only place I/O happens. It selects one **provider**.
       "headers": { "$expr": "({ 'content-type': 'application/json' })" },
       "body":    { "$expr": "objects.save_request" }
     },
-    "output": { "resultType": "SaveResponse", "errorType": "Error",
+    "output": { "result_type": "SaveResponse", "error_type": "Error",
                 "enrich": { "$do": "objects.save_status = result.status" } }
   },
   "route": "return_result" }
@@ -669,7 +669,7 @@ the JSON of §13 — `$expr`/`$do`/`script` bodies become readable multiline JS.
       // split the order into one child item per order line
       split:
       {
-        itemType: order_line
+        item_type: order_line
         selector:
           '''
           data.order_item_ids
@@ -869,9 +869,9 @@ The full schema is delivered as `aflow.schema.json`. Skeleton:
 
         // exactly one body kind:
         "enrich":    { "type": "object", "properties": { "$do": { "type": "string" } } },
-        "split":     { "type": "object", "required": ["itemType", "selector"],
-                       // E1: itemType and route are per-child, so both accept an expression.
-                       "properties": { "itemType": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/expr" } ] },
+        "split":     { "type": "object", "required": ["item_type", "selector"],
+                       // E1: item_type and route are per-child, so both accept an expression.
+                       "properties": { "item_type": { "oneOf": [ { "type": "string" }, { "$ref": "#/$defs/expr" } ] },
                                        "selector": { "$ref": "#/$defs/expr" },
                                        "route": { "$ref": "#/$defs/route" }, "parallel": { "type": "boolean" } } },
         "aggregate": { "$ref": "#/$defs/gate" },
@@ -906,7 +906,7 @@ The full schema is delivered as `aflow.schema.json`. Skeleton:
         "provider": { "enum": ["http", "sub_workflow", "js"] },
         "input":    { "$ref": "#/$defs/expr" },
         "output":   { "type": "object",
-                      "properties": { "resultType": { "type": "string" }, "errorType": { "type": "string" },
+                      "properties": { "result_type": { "type": "string" }, "error_type": { "type": "string" },
                                       "enrich": { "$ref": "#/$defs/expr" } } },
         "request":  { "type": "object" },                       // http
         "name":     { "type": "string" },                       // sub_workflow
@@ -965,7 +965,7 @@ flowchart TD
   },
   "tasks": [
     { "name": "add_order_lines", "item": "input",
-      "split": { "itemType": "order_line",
+      "split": { "item_type": "order_line",
                  "selector": { "$expr": "objects.order.order_items.map(oi => ({ order_item_id: oi.id }))" },
                  "route": "enrich_order_line", "parallel": true },
       "route": "change_order_item_router" },
@@ -983,7 +983,7 @@ flowchart TD
                 "request": { "method": "POST",
                              "url": { "$expr": "`${parameters['persistence.base-url']}/orders/${data.order_id}`" },
                              "body": { "$expr": "objects.save_request" } },
-                "output": { "resultType": "SaveResponse", "errorType": "Error" } },
+                "output": { "result_type": "SaveResponse", "error_type": "Error" } },
       "route": "return_result" }
   ]
 }
@@ -1024,14 +1024,14 @@ introduces a third flavour of embedded code.
 
 ### E1 — `split` chooses each child's type and route
 
-`split.itemType` and `split.route` were single static strings, so one `split`
+`split.item_type` and `split.route` were single static strings, so one `split`
 produced one item type on one path. Both now accept an expression, evaluated
 **once per produced child** with `this` bound to that child:
 
 ```jsonc
 { "name": "split_order_lines", "item": "order",
   "split": {
-    "itemType": { "$expr": "data.product_type === 'hotel' ? 'hotel_line' : 'flight_line'" },
+    "item_type": { "$expr": "data.product_type === 'hotel' ? 'hotel_line' : 'flight_line'" },
     "selector": { "$expr": "data.order_lines" },
     "route":    { "$expr": "type === 'hotel_line' ? 'create_hotel_record' : 'book_flight'" },
     "parallel": true
@@ -1043,7 +1043,7 @@ produced one item type on one path. Both now accept an expression, evaluated
 `switch`/`cases` — so a child can be routed on its own `data` without a
 router node standing in the way.
 
-While evaluating `itemType` the child does not exist yet, so the scope is
+While evaluating `item_type` the child does not exist yet, so the scope is
 narrowed to `data` (the selector element), `index` (its position, which is
 deterministic because the selector is pure), `parent`, `root`, `parameters` and
 `ctx`. `route` is evaluated afterwards, against the real child.

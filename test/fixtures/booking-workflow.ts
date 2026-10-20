@@ -46,6 +46,7 @@ export const bookingWorkflow: WorkflowDefinition = {
   definitions: {
     input: { $ref: "#/definitions/travelco.BookingRequest" },
     result: { $ref: "#/definitions/travelco.BookingResponse" },
+    "travelco.HotelRecord": { type: "object" },
     "travelco.BookingRequest": {
       type: "object",
       required: ["order_id", "payment_instrument", "order_lines"],
@@ -143,7 +144,7 @@ export const bookingWorkflow: WorkflowDefinition = {
       item: "order",
       split: {
         // [E1] one split, two item types — chosen per produced child.
-        itemType: {
+        item_type: {
           $expr: "data.product_type === 'hotel' ? 'hotel_line' : 'flight_line'",
         },
         selector: { $expr: "data.order_lines" },
@@ -170,7 +171,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         },
         script: "async (input, lib) => await lib.createRecord(input)",
         output: {
-          resultType: "HotelRecord",
+          result_type: "travelco.HotelRecord",
           enrich: { $do: "objects.record_id = result.record_id" },
         },
       },
