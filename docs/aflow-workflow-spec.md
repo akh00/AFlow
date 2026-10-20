@@ -881,7 +881,9 @@ Inside the arrow:
   runs only its `$do`. A block body at a value position is an error (`body-form`).
 - A block body (`$do`) MAY assign to members (`objects.x = …`,
   `logging_context.y = …`) and rebind `data`, `target_state` and `next_task` — the
-  names the engine copies back to the item.
+  names the engine copies back to the item. Assignment to a destructured scope name
+  is allowed only for `data`, `target_state` and `next_task`, and only at a statement
+  position; any other assignment to a parameter name is an error (`scope-rebind`).
 
 The same analysis enforces these rules in the editor and in `aflow build`: a
 workflow that shows no error in the editor MUST build, and one that builds MUST have
@@ -963,7 +965,7 @@ TypeScript-server editor with `@aflow/ts-plugin` enabled, with no manual regener
 step while editing:
 
 1. **Field completion from the workflow's types** — `data.`, `objects.`, `parent.`,
-   `items[0].`, `set[0].` — and `result.` when `call.output.result_type` is given —
+   `items[0].`, `set[0].` and `result.` (in `call.output.*`, §15.4) —
    complete and type-check from the schemas of §10 / §15.7.
 2. **Name completion** — route targets (`route`, `cases`, `default`, `split.route`,
    `dispatch.route`, `config.defaults.entry`) offer every task of the workflow,
@@ -982,7 +984,8 @@ step while editing:
 
 4. **Determinism diagnostics inside expressions** — every §15.4 / §15.6 violation
    (`outside-reference`, `forbidden-global`, `this`, `async`, `dynamic-import`,
-   `param-shape`, `body-form`), at the offending identifier, parameter or body.
+   `param-shape`, `body-form`, `scope-rebind`), at the offending identifier, parameter
+   or body.
 5. **Hover documentation** on DSL fields and body kinds citing the spec section and
    its normative rule — e.g. `aggregate`: "§7 — `until` MUST be monotonic; `reduce`
    MUST be commutative and associative."

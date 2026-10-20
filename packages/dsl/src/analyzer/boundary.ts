@@ -12,12 +12,21 @@
 import { FORBIDDEN_REASONS, SAFE_GLOBAL_NAMES } from "@aflow/engine";
 import type * as TS from "typescript";
 
-import { type Position, SCOPE_AT } from "../surface/scope.js";
+import { type Position, SCOPE_AT, STATEMENT_POSITIONS } from "../surface/scope.js";
 import { type AflowDiagnostic, diagnosticAt } from "./diagnostics.js";
 
 type Ts = typeof TS;
 
 const SAFE = new Set(SAFE_GLOBAL_NAMES);
+
+/**
+ * The scope names that the engine copies back to the item after a statement
+ * position runs (engine `writeBack`). The engine drops an assignment to any
+ * other scope name (§15.4).
+ */
+const COPIED_BACK: ReadonlySet<string> = new Set(["data", "target_state", "next_task"]);
+
+const STATEMENT: ReadonlySet<string> = new Set(STATEMENT_POSITIONS);
 
 /**
  * The one safe-global member the engine refuses (`SAFE_MATH.random` throws).
@@ -65,6 +74,42 @@ function isNonReference(ts: Ts, id: TS.Identifier): boolean {
     (ts.isMethodDeclaration(p) && p.name === id) ||
     (ts.isPropertyDeclaration(p) && p.name === id)
   );
+}
+
+/**
+ * True if `id` is the target of an assignment, an increment or a decrement.
+ * This includes a target inside a destructuring assignment and the variable
+ * of a `for … in` or `for … of` loop.
+ */
+function isAssignmentTarget(ts: Ts, id: TS.Identifier): boolean {
+  let n: TS.Node = id;
+  for (;;) {
+    const p = n.parent;
+    if (
+      ts.isParenthesizedExpression(p) ||
+      ts.isNonNullExpression(p) ||
+      ts.isAsExpression(p) ||
+      ts.isTypeAssertionExpression(p) ||
+      ts.isSatisfiesExpression(p) ||
+      ts.isArrayLiteralExpression(p) ||
+      ts.isSpreadElement(p) ||
+      ts.isSpreadAssignment(p) ||
+      (ts.isShorthandPropertyAssignment(p) && p.name === n) ||
+      (ts.isPropertyAssignment(p) && p.initializer === n)
+    ) {
+      n = ts.isShorthandPropertyAssignment(p) || ts.isPropertyAssignment(p) || ts.isSpreadAssignment(p) ? p.parent : p;
+      continue;
+    }
+    if (ts.isBinaryExpression(p)) {
+      const op = p.operatorToken.kind;
+      return p.left === n && op >= ts.SyntaxKind.FirstAssignment && op <= ts.SyntaxKind.LastAssignment;
+    }
+    if (ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) {
+      return p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken;
+    }
+    if (ts.isForInStatement(p) || ts.isForOfStatement(p)) return p.initializer === n;
+    return false;
+  }
 }
 
 /** True if `node` is a function-like that binds its own `this`. */
@@ -122,8 +167,11 @@ function checkParams(ts: Ts, arrow: TS.ArrowFunction, position: Position): Aflow
  *
  * `kind` is `"pure"` for a §15.5 position, with `position` set. It is
  * `"effect"` for `call.script` (§15.6), with `position` `null`: effect code is
- * exempt from `param-shape`, `async` and `forbidden-global`, and may use
- * any host global (R20). It is not exempt from `outside-reference`.
+ * exempt from `param-shape`, `async`, `forbidden-global` and `scope-rebind`,
+ * and may use any host global (R20). It is not exempt from `outside-reference`.
+ * In pure code, `this` is an error everywhere, also in a nested function or
+ * class: the engine evaluates the code in sloppy mode, so there `this` is
+ * `globalThis`. In effect code, a nested function or class binds its own `this`.
  */
 export function checkBoundary(
   ts: Ts,
@@ -138,6 +186,21 @@ export function checkBoundary(
   const inside = (d: TS.Declaration) => d.getSourceFile() === sf && d.getStart(sf) >= lo && d.getEnd() <= hi;
 
   if (kind === "pure" && position) out.push(...checkParams(ts, arrow, position));
+
+  // The names that the parameter pattern binds (§15.4).
+  const params = new Set<TS.Node>(
+    arrow.parameters.flatMap((p) => (ts.isObjectBindingPattern(p.name) ? [...p.name.elements] : [])),
+  );
+  const checkRebind = (id: TS.Identifier, symbol: TS.Symbol | undefined): void => {
+    if (kind !== "pure" || !position || !symbol?.declarations?.some((d) => params.has(d))) return;
+    if (!isAssignmentTarget(ts, id)) return;
+    const name = id.text;
+    if (COPIED_BACK.has(name) && STATEMENT.has(position)) return;
+    const why = COPIED_BACK.has(name)
+      ? `\`${position}\` is a value position. The engine copies \`${name}\` back to the item only at a statement position`
+      : `The engine copies back only \`data\`, \`target_state\` and \`next_task\`. Assign to a member instead, e.g. \`${name}.x = …\``;
+    out.push(diagnosticAt(id, "scope-rebind", `The assignment to the scope name \`${name}\` has no effect. ${why} (§15.4).`));
+  };
   if (kind === "pure" && arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
     out.push(diagnosticAt(arrow, "async", "A pure expression MUST NOT be `async`. All I/O belongs in a `call` body (§5, §15.4)."));
   }
@@ -187,6 +250,7 @@ export function checkBoundary(
       const symbol = ts.isShorthandPropertyAssignment(p) && p.name === node
         ? checker.getShorthandAssignmentValueSymbol(p)
         : checker.getSymbolAtLocation(node);
+      checkRebind(node, symbol);
       checkName(node, symbol);
       return;
     }
@@ -209,7 +273,7 @@ export function checkBoundary(
     } else if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
       out.push(diagnosticAt(node, "dynamic-import", "`import.meta` is not available in shipped code (§15.4)."));
     }
-    const childThis = ownThis || bindsThis(ts, node);
+    const childThis = kind === "effect" && (ownThis || bindsThis(ts, node));
     ts.forEachChild(node, (c) => visit(c, childThis));
   };
   ts.forEachChild(arrow, (c) => visit(c, false));

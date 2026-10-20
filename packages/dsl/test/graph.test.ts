@@ -206,6 +206,25 @@ describe("item-type-mismatch", () => {
       ),
     ).toEqual([["item-type-mismatch", "error", "l"]]);
   });
+
+  it("does not route a `return` node: the engine ends its branch (§6.6)", () => {
+    expect(
+      graph(
+        `
+  a: { item: "order", split: { item_type: "line", selector: ({ data }) => [data], route: "r" }, route: null },
+  r: { item: "line", return: { result: ({ data }) => data } },`,
+        `config: { defaults: { task: { route: "a" } } },`,
+      ),
+    ).toEqual([]);
+    expect(
+      graph(
+        `
+  a: { item: "order", split: { item_type: "line", selector: ({ data }) => [data], route: "r" }, route: null },
+  r: { item: "line", return: { result: ({ data }) => data }, route: "z" },
+  z: { item: "order", route: null },`,
+      ),
+    ).toEqual([["unreachable", "warning", "z"]]);
+  });
 });
 
 // ── unreachable ────────────────────────────────────────────────────────────

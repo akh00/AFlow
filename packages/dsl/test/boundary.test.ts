@@ -61,6 +61,7 @@ const BOUNDARY_RULES: readonly RuleId[] = [
   "async",
   "dynamic-import",
   "param-shape",
+  "scope-rebind",
 ];
 
 /** The boundary diagnostics of the program built from `fields` / `extra`. */
@@ -142,6 +143,17 @@ describe("checkBoundary — free identifiers (§15.4)", () => {
 describe("checkBoundary — this, async, import()", () => {
   it("this is reported", () => {
     expect(rules(boundary(`condition: ({}) => this.data`))).toContain("this");
+  });
+
+  it("this in a nested function of a pure expression is reported: the engine binds it to globalThis", () => {
+    const fields =
+      "condition: ({ data }) => [data].map(function (this: typeof globalThis) { return this.Date.now(); }).length > 0";
+    expect(rules(boundary(fields))).toEqual(["this"]);
+  });
+
+  it("this in a nested class of a pure expression is reported", () => {
+    const fields = "condition: ({ data }) => new (class { v = this; })() !== data";
+    expect(rules(boundary(fields))).toEqual(["this"]);
   });
 
   it("an async pure arrow is reported", () => {
@@ -244,5 +256,40 @@ describe("checkBoundary — call.script and ambient globals (R20)", () => {
   it("a script still may not use a module constant", () => {
     const ds = boundary(call(`async (input, lib) => await lib.x(URL_BASE + input)`), `const URL_BASE = "https://x";`, true);
     expect(rules(ds)).toEqual(["outside-reference"]);
+  });
+});
+
+describe("checkBoundary — this in effect code (§15.6)", () => {
+  it("a nested function of a script binds its own this", () => {
+    const script = `async (input, lib) => [input].map(function (this: unknown) { return this; })`;
+    const fields = `call: { provider: "js", input: ({ data }) => data, script: ${script}, output: { result_type: "acme.Hold" } }`;
+    expect(boundary(fields)).toEqual([]);
+  });
+});
+
+// ── assignment to scope names ──────────────────────────────────────────────
+
+describe("checkBoundary — scope-rebind (§15.4)", () => {
+  it.each([
+    ["assigning objects in a statement block", `enrich: ({ objects }) => { objects = { a: 1 }; }`, "objects"],
+    ["assigning next_task at a value position", `target_state_setter: ({ next_task }) => (next_task = "zz", "success")`, "next_task"],
+    ["assigning data at a value position", `condition: ({ data }) => (data = data) !== null`, "data"],
+    ["a compound assignment to tasks", `enrich: ({ tasks }) => { tasks ??= {}; }`, "tasks"],
+    ["an increment of id", `enrich: ({ id }) => { (id as unknown as number)++; }`, "id"],
+    ["a destructuring assignment to objects", `enrich: ({ objects }) => { [objects] = [{}]; }`, "objects"],
+  ])("%s is scope-rebind", (_label, fields, name) => {
+    const ds = boundary(fields);
+    expect(rules(ds)).toEqual(["scope-rebind"]);
+    expect(ds[0]!.message).toContain(`\`${name}\``);
+  });
+
+  it.each([
+    ["assigning target_state in a statement block", `enrich: ({ target_state }) => { target_state = "failure"; }`],
+    ["assigning data and next_task in reduce", `aggregate: { select: ({ items }) => items, reduce: ({ data, next_task, set }) => { data = set; next_task = null; } }`],
+    ["assigning a member of objects", `enrich: ({ objects }) => { objects.x = 1; }`],
+    ["assigning a local that shadows a scope name", `enrich: ({ objects }) => { [1].forEach((objects) => { objects = 2; }); }`],
+    ["assigning a local copy", `enrich: ({ objects }) => { let o = objects; o = {}; }`],
+  ])("%s is valid", (_label, fields) => {
+    expect(boundary(fields)).toEqual([]);
   });
 });

@@ -27,6 +27,7 @@ const RULES = [
   "no-entry",
   "project-config",
   "type-error",
+  "scope-rebind",
 ] as const;
 
 export type RuleId = (typeof RULES)[number];

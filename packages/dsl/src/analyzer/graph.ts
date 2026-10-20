@@ -230,8 +230,14 @@ export function checkGraph(
     }
 
     // ── route: the same item ──
+    // The engine does not route a `return` node: it ends the branch (§6.6).
+    // A route on it gives no edge and no mismatch. A name in it must still name a task.
     const own = node.route !== undefined;
-    const routed = own ? routeAt(node.route, lit, ["route"], src.name, `${base}/route`) : defaultTargets;
+    const ends = node.return !== undefined;
+    if (ends && own) {
+      checkKnown(routeTargets(ts, checker, node.route, literalAt(ts, lit, ["route"]), src.name, arrows.get(`${base}/route`)).targets);
+    }
+    const routed = ends ? [] : own ? routeAt(node.route, lit, ["route"], src.name, `${base}/route`) : defaultTargets;
     for (const t of routed) {
       next.push(t.name);
       const target = taskOf(t.name);

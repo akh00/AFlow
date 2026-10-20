@@ -422,6 +422,13 @@ export function extractWorkflows(
     if (h.entries.length === 0) workflows.push(compose(h, null));
     for (const e of h.entries) workflows.push(compose(h, e));
   }
+  // A misplaced header call belongs to no header. The editor shows it in its file,
+  // so a workflow that has that file reports it too (R28).
+  for (const { analysis } of workflows) {
+    const own = new Set(analysis.files);
+    const found = stray.filter((d) => own.has(d.file));
+    if (found.length) analysis.diagnostics = sortedUnique([...analysis.diagnostics, ...found]);
+  }
   const diagnostics = sortedUnique([
     ...stray,
     ...[...headers.values()].flatMap((h) => [...h.diagnostics, ...h.entries.flatMap((e) => e.diagnostics)]),

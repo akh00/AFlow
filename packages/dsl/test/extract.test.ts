@@ -302,6 +302,8 @@ describe("analyzeProgram — diagnostics", () => {
     expect(RULE_CODES["body-form"]).toBe(77016);
     expect(RULE_CODES["no-entry"]).toBe(77017);
     expect(RULE_CODES["project-config"]).toBe(77018);
+    expect(RULE_CODES["type-error"]).toBe(77019);
+    expect(RULE_CODES["scope-rebind"]).toBe(77020);
   });
 
   it("`timeout: 2 * 1000` is not-static", () => {
