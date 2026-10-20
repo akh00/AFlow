@@ -320,7 +320,11 @@ export default wf.assemble(g);
 `,
     });
     const { a } = only(program);
-    expect(a.diagnostics.map((d) => [d.rule, textAt(program, d)])).toEqual([["not-static", "[NAME]"]]);
+    expect(a.diagnostics.map((d) => [d.rule, textAt(program, d)])).toEqual([
+      // The header's `entry` now names no task: the computed name is dropped.
+      ["unknown-task", `"split_lines"`],
+      ["not-static", "[NAME]"],
+    ]);
   });
 
   it("a variable, a helper call and a spread are not-static", () => {

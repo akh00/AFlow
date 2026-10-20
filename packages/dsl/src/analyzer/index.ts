@@ -10,8 +10,9 @@ import type { WorkflowDefinition } from "@aflow/engine";
 import type * as TS from "typescript";
 
 import type { WorkflowHeader } from "../surface/header.js";
-import type { AflowDiagnostic } from "./diagnostics.js";
+import { type AflowDiagnostic, sortedUnique } from "./diagnostics.js";
 import { extractWorkflows } from "./extract.js";
+import { checkGraph } from "./graph.js";
 
 /** A 1-based source position. */
 export interface Loc {
@@ -66,6 +67,15 @@ export function arrowsOf(wf: WorkflowAnalysis): Map<string, TS.ArrowFunction> | 
 /** Analyses every workflow declared in `program`. */
 export function analyzeProgram(ts: typeof TS, program: TS.Program): Analysis {
   const { workflows, diagnostics } = extractWorkflows(ts, program);
-  for (const w of workflows) ARROWS.set(w.analysis, w.arrows);
-  return { workflows: workflows.map((w) => w.analysis), diagnostics };
+  const checker = program.getTypeChecker();
+  const graph: AflowDiagnostic[] = [];
+  for (const w of workflows) {
+    ARROWS.set(w.analysis, w.arrows);
+    // A header that no file assembles has no tasks to check; `unassembled-group` reports its groups.
+    if (w.analysis.entryFile === null) continue;
+    const found = checkGraph(ts, checker, w.analysis, w.arrows, w.sources);
+    w.analysis.diagnostics = sortedUnique([...w.analysis.diagnostics, ...found]);
+    graph.push(...found);
+  }
+  return { workflows: workflows.map((w) => w.analysis), diagnostics: sortedUnique([...diagnostics, ...graph]) };
 }

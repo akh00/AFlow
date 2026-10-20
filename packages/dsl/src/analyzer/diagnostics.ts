@@ -56,3 +56,10 @@ export function diagnosticAt(
   const start = node.getStart(sf);
   return { rule, severity, message, file: sf.fileName, start, length: node.getEnd() - start };
 }
+
+/** Removes repeated diagnostics (same file, span and rule) and sorts by file, then by offset. */
+export function sortedUnique(diags: Iterable<AflowDiagnostic>): AflowDiagnostic[] {
+  const byKey = new Map<string, AflowDiagnostic>();
+  for (const d of diags) byKey.set(`${d.file}\0${d.start}\0${d.length}\0${d.rule}`, d);
+  return [...byKey.values()].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.start - b.start));
+}

@@ -14,8 +14,9 @@ import type * as TS from "typescript";
 import type { WorkflowHeader } from "../surface/header.js";
 import { type Position, SCOPE_AT, STATEMENT_POSITIONS } from "../surface/scope.js";
 import { checkBoundary } from "./boundary.js";
-import { type AflowDiagnostic, diagnosticAt } from "./diagnostics.js";
+import { type AflowDiagnostic, diagnosticAt, sortedUnique } from "./diagnostics.js";
 import { emitArrow, emitScript, emitStatements } from "./emit.js";
+import type { GraphSources } from "./graph.js";
 import type { Loc, SourceLocations, WorkflowAnalysis } from "./index.js";
 import { type ArrowHandler, type LiteralPath, propertyNameText, readLiteral, snippet, unwrapLiteral } from "./literal.js";
 
@@ -33,12 +34,16 @@ interface TaskRecord {
   node: Node;
   loc: Loc;
   exprs: ExprRecord[];
+  nameNode: TS.PropertyName;
+  literal: TS.ObjectLiteralExpression;
 }
 
 interface HeaderDecl {
   symbol: TS.Symbol;
   name: string;
   call: TS.CallExpression;
+  /** The header object literal; absent when the argument is not one. */
+  literal?: TS.ObjectLiteralExpression;
   /** Diagnostics of the header literal and of misplaced calls on this header. */
   diagnostics: AflowDiagnostic[];
   header: WorkflowHeader;
@@ -65,6 +70,7 @@ interface EntryDecl {
 export interface Extracted {
   analysis: WorkflowAnalysis;
   arrows: Map<string, TS.ArrowFunction>;
+  sources: GraphSources;
 }
 
 const DSL_MODULE = "@aflow/dsl";
@@ -204,6 +210,7 @@ function objectArgument(ts: Ts, call: TS.CallExpression, diagnostics: AflowDiagn
 function extractHeader(ts: Ts, checker: TS.TypeChecker, h: HeaderDecl): void {
   const lit = objectArgument(ts, h.call, h.diagnostics);
   if (!lit) return;
+  h.literal = lit;
   const walk = { diagnostics: h.diagnostics, onArrow: arrowHandler(ts, checker, "config", h.exprs, h.diagnostics) };
   const header = (readLiteral(ts, lit, walk) ?? {}) as WorkflowHeader;
   h.header = header;
@@ -255,19 +262,14 @@ function extractGroup(ts: Ts, checker: TS.TypeChecker, g: GroupDecl): void {
     const exprs: ExprRecord[] = [];
     const walk = { diagnostics: g.diagnostics, onArrow: arrowHandler(ts, checker, "node", exprs, g.diagnostics) };
     const { name: _ignored, ...fields } = readLiteral(ts, value, walk) as Record<string, unknown>;
-    g.tasks.push({ name, node: { name, ...fields } as Node, loc: locOf(p.name), exprs });
+    g.tasks.push({ name, node: { name, ...fields } as Node, loc: locOf(p.name), exprs, nameNode: p.name, literal: value });
   }
-}
-
-function sortedUnique(diags: Iterable<AflowDiagnostic>): AflowDiagnostic[] {
-  const byKey = new Map<string, AflowDiagnostic>();
-  for (const d of diags) byKey.set(`${d.file}\0${d.start}\0${d.length}\0${d.rule}`, d);
-  return [...byKey.values()].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.start - b.start));
 }
 
 function compose(h: HeaderDecl, entry: EntryDecl | null): Extracted {
   const arrows = new Map<string, TS.ArrowFunction>();
   const locations: SourceLocations = { tasks: {}, expressions: {} };
+  const sources: GraphSources = { header: h.literal, tasks: [] };
   for (const e of h.exprs) {
     locations.expressions[e.pointer] = e.loc;
     arrows.set(e.pointer, e.arrow);
@@ -277,7 +279,9 @@ function compose(h: HeaderDecl, entry: EntryDecl | null): Extracted {
   for (const t of groups.flatMap((g) => g.tasks)) {
     const at = `/tasks/${tasks.length}`;
     tasks.push(t.node);
-    locations.tasks[t.name] = t.loc;
+    sources.tasks.push({ name: t.nameNode, literal: t.literal });
+    // A second task of the same name is a `duplicate-task` (graph check); the first keeps its location.
+    locations.tasks[t.name] ??= t.loc;
     for (const e of t.exprs) {
       locations.expressions[at + e.pointer] = e.loc;
       arrows.set(at + e.pointer, e.arrow);
@@ -298,7 +302,7 @@ function compose(h: HeaderDecl, entry: EntryDecl | null): Extracted {
       ...(entry?.diagnostics ?? []),
     ]),
   };
-  return { analysis, arrows };
+  return { analysis, arrows, sources };
 }
 
 /** Extracts every workflow of `program`. */
@@ -377,7 +381,11 @@ export function extractWorkflows(
     const entry: EntryDecl = { file: call.getSourceFile().fileName, groups: [], diagnostics: [] };
     for (const arg of call.arguments) {
       const g = ts.isIdentifier(arg) ? groups.get(resolvedSymbol(ts, checker, arg)!) : undefined;
-      if (g && header.groups.includes(g)) entry.groups.push(g);
+      if (g && entry.groups.includes(g)) {
+        entry.diagnostics.push(
+          diagnosticAt(arg, "duplicate-task", `\`${snippet(arg)}\` is already listed. List each task group once (§15.3).`),
+        );
+      } else if (g && header.groups.includes(g)) entry.groups.push(g);
       else {
         entry.diagnostics.push(
           diagnosticAt(
@@ -389,6 +397,22 @@ export function extractWorkflows(
       }
     }
     header.entries.push(entry);
+  }
+
+  // §15.3: a group that no assembly of its header lists is a warning.
+  for (const h of headers.values()) {
+    for (const g of h.groups) {
+      if (h.entries.some((e) => e.groups.includes(g))) continue;
+      const name = (g.call.parent as TS.VariableDeclaration).name;
+      g.diagnostics.push(
+        diagnosticAt(
+          name,
+          "unassembled-group",
+          `Task group \`${snippet(name)}\` is not in an assembly. List it in \`${h.name}.assemble(…)\` (§15.3).`,
+          "warning",
+        ),
+      );
+    }
   }
 
   const workflows: Extracted[] = [];
