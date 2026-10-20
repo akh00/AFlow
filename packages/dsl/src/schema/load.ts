@@ -58,12 +58,14 @@ export function loadSchemas(sources: SchemaSource[]): SchemaSet {
   const nsByFile = new Map<string, string>();
   for (const s of sources) if (s.file) nsByFile.set(resolve(s.file), s.namespace);
 
+  const fileOf = new Map<string, string | undefined>();
   const add = (key: string, schema: JsonSchema, file?: string) => {
     if (set.byKey.has(key)) {
       set.errors.push({ kind: "collision", message: `schema key "${key}" is defined more than once`, file });
       return;
     }
     set.byKey.set(key, schema);
+    fileOf.set(key, file);
   };
 
   /** Resolves one `$ref` found in a schema of `namespace` (file `file`, if any). */
@@ -86,7 +88,15 @@ export function loadSchemas(sources: SchemaSource[]): SchemaSet {
       ns = other;
     }
     const m = /^\/(?:definitions|\$defs)\/([^/]+)$/.exec(pointer);
-    if (m) return `${DEFINITIONS_PREFIX}${ns}.${decodeURIComponent(m[1]!)}`;
+    if (m) {
+      let name: string;
+      try {
+        name = decodeURIComponent(m[1]!).replace(/~1/g, "/").replace(/~0/g, "~");
+      } catch {
+        return err("unresolved-ref", `$ref "${ref}" has a malformed percent escape`);
+      }
+      return `${DEFINITIONS_PREFIX}${ns}.${name}`;
+    }
     if (pointer === "" || pointer === "/") {
       const title = path === "" ? [...titles][0] : rootTitle(targetFile!);
       if (title) return `${DEFINITIONS_PREFIX}${ns}.${title}`;
@@ -140,18 +150,41 @@ export function loadSchemas(sources: SchemaSource[]): SchemaSet {
       }
     }
   }
+  // Post-load pass: every rewritten ref must name a loaded key.
+  for (const [key, schema] of set.byKey) {
+    mapRefs(schema, (ref) => {
+      if (ref.startsWith(DEFINITIONS_PREFIX)) {
+        const target = ref.slice(DEFINITIONS_PREFIX.length);
+        if (!set.byKey.has(target)) {
+          set.errors.push({ kind: "unresolved-ref", message: `"${key}" references undefined schema "${target}"`, file: fileOf.get(key) });
+        }
+      }
+      return ref;
+    });
+  }
   return set;
 }
 
-/** The transitive `$ref` closure of `roots`, in sorted key order. */
-export function closure(set: SchemaSet, roots: string[]): Record<string, JsonSchema> {
+/** The transitive `$ref` closure of `roots`, in sorted key order; unknown keys become errors. */
+export function closure(
+  set: SchemaSet,
+  roots: string[],
+): { schemas: Record<string, JsonSchema>; errors: SchemaError[] } {
+  const errors: SchemaError[] = [];
+  const missing = new Set<string>();
   const seen = new Set<string>();
   const stack = [...roots];
   while (stack.length > 0) {
     const key = stack.pop()!;
     if (seen.has(key)) continue;
     const schema = set.byKey.get(key);
-    if (schema === undefined) throw new Error(`unknown schema key "${key}"`);
+    if (schema === undefined) {
+      if (!missing.has(key)) {
+        missing.add(key);
+        errors.push({ kind: "unresolved-ref", message: `unknown schema "${key}"` });
+      }
+      continue;
+    }
     seen.add(key);
     mapRefs(schema, (ref) => {
       if (ref.startsWith(DEFINITIONS_PREFIX)) stack.push(ref.slice(DEFINITIONS_PREFIX.length));
@@ -160,5 +193,5 @@ export function closure(set: SchemaSet, roots: string[]): Record<string, JsonSch
   }
   const out: Record<string, JsonSchema> = {};
   for (const key of [...seen].sort()) out[key] = set.byKey.get(key)!;
-  return out;
+  return { schemas: out, errors };
 }
