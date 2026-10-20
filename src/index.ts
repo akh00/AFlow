@@ -29,7 +29,13 @@ export type {
 export { EvaluationContext, ItemView } from "./context.js";
 export type { CtxView, ItemNode, ItemStatus } from "./context.js";
 
-export { evalExpr, resetExprCache, runDo } from "./expr.js";
+export {
+  evalExpr,
+  FORBIDDEN_REASONS,
+  resetExprCache,
+  runDo,
+  SAFE_GLOBAL_NAMES,
+} from "./expr.js";
 export { parseDuration, resolveRetry } from "./retry.js";
 
 export {

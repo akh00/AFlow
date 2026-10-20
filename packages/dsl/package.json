@@ -1,0 +1,13 @@
+{
+  "name": "@aflow/dsl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AFlow typed TypeScript DSL (spec §15, artifact 2)",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  }
+}
