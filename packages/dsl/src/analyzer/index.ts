@@ -46,6 +46,11 @@ export interface WorkflowAnalysis {
   locations: SourceLocations;
   /** Task names in emitted order. */
   taskNames: string[];
+  /**
+   * The files of this workflow: the header file, the files of the groups that
+   * the assembly lists, and the entry file (Ruling R28).
+   */
+  files: string[];
   /** The diagnostics of the header, the assembled groups and the entry. */
   diagnostics: AflowDiagnostic[];
 }

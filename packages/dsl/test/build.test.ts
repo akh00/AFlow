@@ -172,6 +172,50 @@ export default wf.assemble(g);
     expect(r.diagnostics[0]!.start).toBe(readFileSync(join(dir, "group.ts"), "utf8").indexOf("nope"));
   });
 
+  it("ignores header misuse in a file that the entry does not import (R28)", () => {
+    const dir = project("stray", {
+      "header.ts": HEADER,
+      "acme.json": SCHEMA,
+      "group.ts": `import { wf } from "./header";
+export const g = wf.tasks({ Input: { item: "order", route: null } });
+`,
+      "entry.ts": `import { wf } from "./header";
+import { g } from "./group";
+export default wf.assemble(g);
+`,
+      // In the tsconfig, but not imported by the entry: a second assembly that is not top level.
+      "stray.ts": `import { wf } from "./header";
+import { g } from "./group";
+const y = wf.assemble(g);
+`,
+    });
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.diagnostics).toEqual([]);
+    expect(r.definition).not.toBeNull();
+  });
+
+  it("checks a listed group file whose task names are all duplicates (R28)", () => {
+    const dir = project("dup-group", {
+      "header.ts": HEADER,
+      "acme.json": SCHEMA,
+      "group.ts": `import { wf } from "./header";
+export const g = wf.tasks({ Input: { item: "order", route: null } });
+`,
+      "dup.ts": `import { wf } from "./header";
+const n: number = "not a number";
+export const d = wf.tasks({ Input: { item: "order", route: null } });
+`,
+      "entry.ts": `import { wf } from "./header";
+import { g } from "./group";
+import { d } from "./dup";
+export default wf.assemble(g, d);
+`,
+    });
+    const r = buildWorkflow(join(dir, "entry.ts"));
+    expect(r.definition).toBeNull();
+    expect(r.diagnostics.filter((x) => x.rule === "type-error").map((x) => x.file)).toEqual([join(dir, "dup.ts")]);
+  });
+
   it("merges the schema closure into definitions", () => {
     const dir = project("tiny", {
       "header.ts": HEADER,

@@ -297,6 +297,7 @@ function compose(h: HeaderDecl, entry: EntryDecl | null): Extracted {
     definition: { ...h.base, tasks },
     locations,
     taskNames: tasks.map((t) => t.name),
+    files: [...new Set([sf.fileName, ...groups.map((g) => g.call.getSourceFile().fileName), ...(entry ? [entry.file] : [])])],
     diagnostics: sortedUnique([
       ...h.diagnostics,
       ...groups.flatMap((g) => g.diagnostics),

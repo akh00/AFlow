@@ -76,10 +76,8 @@ function parseConfig(configPath: string, diagnostics: AflowDiagnostic[]): ts.Par
  * `type-error` diagnostics (R27). Library and declaration files are not checked.
  */
 function typeErrors(program: ts.Program, wf: WorkflowAnalysis): AflowDiagnostic[] {
-  const files = new Set([wf.headerFile, ...Object.values(wf.locations.tasks).map((l) => l.file)]);
-  if (wf.entryFile) files.add(wf.entryFile);
   const out: AflowDiagnostic[] = [];
-  for (const name of files) {
+  for (const name of wf.files) {
     const sf = program.getSourceFile(name);
     if (!sf || sf.isDeclarationFile) continue;
     for (const d of [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)]) {
@@ -129,7 +127,9 @@ export function buildWorkflow(entry: string, opts: { tsconfig?: string } = {}): 
     return fail();
   }
 
-  diagnostics.push(...wf.diagnostics, ...typeErrors(program, wf));
+  // R28: the build counts only the diagnostics in the files of this workflow.
+  const own = new Set(wf.files);
+  diagnostics.push(...wf.diagnostics.filter((d) => own.has(d.file)), ...typeErrors(program, wf));
   const { schemas, diagnostics: schemaErrors } = schemaClosure(ts, program, wf);
   diagnostics.push(...schemaErrors);
 
