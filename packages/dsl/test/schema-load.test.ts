@@ -1,0 +1,138 @@
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { closure, loadSchemas } from "../src/schema/load.js";
+
+const fx = (n: string) => join(dirname(fileURLToPath(import.meta.url)), "fixtures", "schemas", n);
+
+describe("loadSchemas", () => {
+  it("loads draft-07 definitions and 2020-12 $defs", () => {
+    const set = loadSchemas([
+      { namespace: "travelco", file: fx("travelco.json") },
+      { namespace: "common", file: fx("common.json") },
+      { namespace: "other", file: fx("other.json") },
+    ]);
+    expect(set.errors).toEqual([]);
+    expect(set.byKey.has("travelco.PaymentInstrument")).toBe(true);
+    expect(set.byKey.has("common.Money")).toBe(true);
+  });
+
+  it("rewrites local refs into the namespace", () => {
+    const set = loadSchemas([{ namespace: "travelco", file: fx("travelco.json") }]);
+    expect(set.byKey.get("travelco.BookingRequest")).toMatchObject({
+      properties: { payment: { $ref: "#/definitions/travelco.PaymentInstrument" } },
+    });
+  });
+
+  it("rewrites relative file refs using the namespace of the referenced file", () => {
+    const set = loadSchemas([
+      { namespace: "common", file: fx("common.json") },
+      { namespace: "other", file: fx("other.json") },
+      { namespace: "pricing", file: fx("priced.json") },
+    ]);
+    expect(set.errors).toEqual([]);
+    expect(set.byKey.get("pricing.Priced")).toMatchObject({
+      properties: { price: { $ref: "#/definitions/common.Money" } },
+    });
+  });
+
+  it("loads inline schemas under the given namespace", () => {
+    const set = loadSchemas([
+      { namespace: "acme", inline: { A: { $ref: "#/definitions/B" }, B: { type: "string" } } },
+    ]);
+    expect(set.errors).toEqual([]);
+    expect(set.byKey.get("acme.A")).toEqual({ $ref: "#/definitions/acme.B" });
+  });
+
+  it("reports a collision", () => {
+    const set = loadSchemas([
+      { namespace: "travelco", file: fx("travelco.json") },
+      { namespace: "travelco", inline: { Unrelated: { type: "number" } } },
+    ]);
+    expect(set.errors.map((e) => e.kind)).toEqual(["collision"]);
+  });
+
+  it("reports remote refs", () => {
+    const set = loadSchemas([{ namespace: "r", file: fx("remote.json") }]);
+    expect(set.errors.map((e) => e.kind)).toEqual(["remote-ref"]);
+  });
+
+  it("reports a relative ref to a file absent from sources", () => {
+    const set = loadSchemas([{ namespace: "m", file: fx("missingfile.json") }]);
+    expect(set.errors.map((e) => e.kind)).toEqual(["unresolved-ref"]);
+    const only = loadSchemas([{ namespace: "pricing", file: fx("priced.json") }]);
+    expect(only.errors.map((e) => e.kind)).toEqual(["unresolved-ref"]);
+  });
+
+  it("reports an unreadable file", () => {
+    const set = loadSchemas([{ namespace: "x", file: fx("does-not-exist.json") }]);
+    expect(set.errors.map((e) => e.kind)).toEqual(["unreadable"]);
+  });
+});
+
+describe("closure", () => {
+  const set = loadSchemas([
+    { namespace: "travelco", file: fx("travelco.json") },
+    { namespace: "common", file: fx("common.json") },
+    { namespace: "other", file: fx("other.json") },
+  ]);
+
+  it("is the transitive ref closure only", () => {
+    expect(Object.keys(closure(set, ["travelco.BookingRequest"]).schemas)).toEqual([
+      "travelco.BookingRequest",
+      "travelco.PaymentInstrument",
+    ]);
+  });
+
+  it("terminates on a recursive type, each key once", () => {
+    expect(Object.keys(closure(set, ["travelco.TreeNode"]).schemas)).toEqual(["travelco.TreeNode"]);
+  });
+
+  it("terminates on a two-file cycle", () => {
+    expect(Object.keys(closure(set, ["common.PingA"]).schemas)).toEqual(["common.PingA", "other.PingB"]);
+  });
+});
+
+describe("diagnostics instead of throws", () => {
+  const set = loadSchemas([
+    { namespace: "d", file: fx("dangling.json") },
+    { namespace: "common", file: fx("common.json") },
+    { namespace: "other", file: fx("other.json") },
+  ]);
+  const msgs = set.errors.map((e) => e.message).join("\n");
+
+  it("flags a dangling local ref", () => {
+    expect(msgs).toContain("d.Nope");
+  });
+
+  it("flags a file ref to a missing name", () => {
+    expect(msgs).toContain("common.NoSuchName");
+  });
+
+  it("flags a malformed percent escape without throwing", () => {
+    expect(set.errors.some((e) => e.kind === "unresolved-ref" && e.message.includes("100%"))).toBe(true);
+  });
+
+  it("decodes ~1 in a pointer and escapes the rewritten ref (R18)", () => {
+    expect(set.byKey.get("d.Slash")).toEqual({ $ref: "#/definitions/d.a~1b" });
+    expect(set.errors.some((e) => e.message.includes("d.a"))).toBe(false);
+    expect(Object.keys(closure(set, ["d.Slash"]).schemas)).toEqual(["d.Slash", "d.a/b"]);
+  });
+
+  it("escapes ~ and / in rewritten inline refs, as the analyzer does (R18)", () => {
+    const s = loadSchemas([
+      { namespace: "n", inline: { A: { $ref: "#/definitions/x~0y~1z" }, "x~y/z": { type: "string" } } },
+    ]);
+    expect(s.errors).toEqual([]);
+    expect(s.byKey.get("n.A")).toEqual({ $ref: "#/definitions/n.x~0y~1z" });
+    expect(Object.keys(closure(s, ["n.A"]).schemas)).toEqual(["n.A", "n.x~y/z"]);
+  });
+
+  it("closure reports an unknown root and keeps going", () => {
+    const r = closure(set, ["nope.Root", "common.Money"]);
+    expect(Object.keys(r.schemas)).toEqual(["common.Money"]);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatchObject({ kind: "unresolved-ref" });
+    expect(r.errors[0]!.message).toContain("nope.Root");
+  });
+});

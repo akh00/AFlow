@@ -1,0 +1,1 @@
+{ "definitions": { "M": { "$ref": "./nowhere.json#/definitions/Z" } } }

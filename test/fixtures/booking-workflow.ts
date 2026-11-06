@@ -46,15 +46,37 @@ export const bookingWorkflow: WorkflowDefinition = {
   definitions: {
     input: { $ref: "#/definitions/travelco.BookingRequest" },
     result: { $ref: "#/definitions/travelco.BookingResponse" },
+
+    // Message types (in the DSL: `schemas/travelco.json`).
     "travelco.BookingRequest": {
       type: "object",
-      required: ["order_id", "payment_instrument", "order_lines"],
+      required: ["order_id", "customer", "payment_instrument", "order_lines"],
       properties: {
         order_id: { type: "string" },
         currency: { type: "string" },
-        customer: { type: "object" },
+        customer: { $ref: "#/definitions/travelco.Customer" },
         payment_instrument: { $ref: "#/definitions/travelco.PaymentInstrument" },
-        order_lines: { type: "array", items: { type: "object" } },
+        order_lines: { type: "array", items: { $ref: "#/definitions/travelco.OrderLine" } },
+      },
+    },
+    "travelco.Customer": {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string" },
+        email: { type: "string" },
+        name: { type: "string" },
+      },
+    },
+    "travelco.OrderLine": {
+      type: "object",
+      required: ["id", "product_type", "supplier", "amount"],
+      properties: {
+        id: { type: "string" },
+        product_type: { enum: ["hotel", "flight"] },
+        supplier: { type: "string" },
+        amount: { type: "number" },
+        currency: { type: "string" },
       },
     },
     "travelco.PaymentInstrument": {
@@ -81,11 +103,49 @@ export const bookingWorkflow: WorkflowDefinition = {
         audit: { type: "object" },
       },
     },
-    "travelco.OrderObjects": { type: "object" },
-    "travelco.HotelLineData": { type: "object" },
-    "travelco.HotelLineObjects": { type: "object" },
-    "travelco.FlightLineData": { type: "object" },
-    "travelco.FlightLineObjects": { type: "object" },
+
+    // Workflow-private types (in the DSL: the header's inline `types`).
+    "travelco.OrderObjects": {
+      type: "object",
+      properties: { payment: { $ref: "#/definitions/travelco.PaymentInstrument" } },
+    },
+    "travelco.HotelLineData": { $ref: "#/definitions/travelco.OrderLine" },
+    "travelco.HotelLineObjects": {
+      type: "object",
+      properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
+    },
+    "travelco.FlightLineData": { $ref: "#/definitions/travelco.OrderLine" },
+    "travelco.FlightLineObjects": {
+      type: "object",
+      properties: { phase: { enum: ["reserved", "settled", "released", "abandoned"] } },
+    },
+    // Supplier results, one per call (§9).
+    "travelco.HotelRecord": {
+      type: "object",
+      required: ["record_id"],
+      properties: { record_id: { type: "string" } },
+    },
+    "travelco.HotelHold": {
+      type: "object",
+      required: ["hold_id"],
+      properties: { hold_id: { type: "string" } },
+    },
+    "travelco.HotelConfirmation": {
+      type: "object",
+      required: ["confirmation"],
+      properties: { confirmation: { type: "string" } },
+    },
+    "travelco.HotelRelease": { type: "object", properties: { released: { type: "boolean" } } },
+    "travelco.HotelDiscard": { type: "object", properties: { discarded: { type: "boolean" } } },
+    "travelco.FlightBooking": {
+      type: "object",
+      required: ["confirmation", "ticket_numbers"],
+      properties: {
+        confirmation: { type: "string" },
+        ticket_numbers: { type: "array", items: { type: "string" } },
+      },
+    },
+    "travelco.FlightCancellation": { type: "object", properties: { cancelled: { type: "boolean" } } },
   },
 
   items: {
@@ -143,7 +203,7 @@ export const bookingWorkflow: WorkflowDefinition = {
       item: "order",
       split: {
         // [E1] one split, two item types — chosen per produced child.
-        itemType: {
+        item_type: {
           $expr: "data.product_type === 'hotel' ? 'hotel_line' : 'flight_line'",
         },
         selector: { $expr: "data.order_lines" },
@@ -170,7 +230,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         },
         script: "async (input, lib) => await lib.createRecord(input)",
         output: {
-          resultType: "HotelRecord",
+          result_type: "travelco.HotelRecord",
           enrich: { $do: "objects.record_id = result.record_id" },
         },
       },
@@ -195,6 +255,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         },
         script: "async (input, lib) => await lib.hold(input)",
         output: {
+          result_type: "travelco.HotelHold",
           enrich: { $do: "objects.hold_id = result.hold_id" },
         },
       },
@@ -237,6 +298,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         },
         script: "async (input, lib) => await lib.book(input)",
         output: {
+          result_type: "travelco.FlightBooking",
           enrich: {
             $do: `
               objects.confirmation = result.confirmation;
@@ -315,7 +377,10 @@ export const bookingWorkflow: WorkflowDefinition = {
             "({ hold_id: objects.hold_id, record_id: objects.record_id, order_line_id: data.id })",
         },
         script: "async (input, lib) => await lib.commit(input)",
-        output: { enrich: { $do: "objects.confirmation = result.confirmation" } },
+        output: {
+          result_type: "travelco.HotelConfirmation",
+          enrich: { $do: "objects.confirmation = result.confirmation" },
+        },
       },
       route: "mark_hotel_settled",
     },
@@ -338,7 +403,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         implementation: { bundle_name: "hotel-supplier", bundle_version: "2.1.0" },
         input: { $expr: "({ hold_id: objects.hold_id, order_line_id: data.id })" },
         script: "async (input, lib) => await lib.release(input)",
-        output: { enrich: { $do: "objects.released = true" } },
+        output: { result_type: "travelco.HotelRelease", enrich: { $do: "objects.released = true" } },
       },
       // The line reserved successfully but the order did not: not booked.
       target_state_setter: { $expr: "'failure'" },
@@ -362,7 +427,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         implementation: { bundle_name: "hotel-supplier", bundle_version: "2.1.0" },
         input: { $expr: "({ record_id: objects.record_id, order_line_id: data.id })" },
         script: "async (input, lib) => await lib.discardRecord(input)",
-        output: { enrich: { $do: "objects.discarded = true" } },
+        output: { result_type: "travelco.HotelDiscard", enrich: { $do: "objects.discarded = true" } },
       },
       target_state_setter: { $expr: "'failure'" },
       route: "mark_hotel_abandoned",
@@ -395,7 +460,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         implementation: { bundle_name: "flight-supplier", bundle_version: "1.0.3" },
         input: { $expr: "({ confirmation: objects.confirmation, order_line_id: data.id })" },
         script: "async (input, lib) => await lib.cancel(input)",
-        output: { enrich: { $do: "objects.cancelled = true" } },
+        output: { result_type: "travelco.FlightCancellation", enrich: { $do: "objects.cancelled = true" } },
       },
       target_state_setter: { $expr: "'failure'" },
       route: "mark_flight_released",
@@ -423,7 +488,7 @@ export const bookingWorkflow: WorkflowDefinition = {
         select: { $expr: "items" },
         until: {
           $expr:
-            "set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase))",
+            "set.every(i => ['settled', 'released', 'abandoned'].includes(i.objects.phase ?? ''))",
         },
         reduce: {
           $do: `
@@ -449,8 +514,8 @@ export const bookingWorkflow: WorkflowDefinition = {
             currency: data.currency,
             total: objects.lines_total,
             payment: {
-              instrument: objects.payment.type,
-              last4: objects.payment.token.slice(-4)
+              instrument: objects.payment?.type,
+              last4: objects.payment?.token.slice(-4)
             },
             bookings: items.map(i => ({
               order_line_id: i.data.id,

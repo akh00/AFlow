@@ -62,6 +62,14 @@ const SAFE_MATH: Record<string, unknown> = Object.freeze(
 SAFE_GLOBALS.Math = SAFE_MATH;
 
 /**
+ * Every name an expression may reach beyond its scope. Exported so the DSL
+ * analyzer (§15.4) takes the list from the engine rather than from a copy.
+ */
+export const SAFE_GLOBAL_NAMES: readonly string[] = Object.freeze(
+  Object.keys(SAFE_GLOBALS),
+);
+
+/**
  * Identifiers an expression must never resolve. Naming one is a determinism
  * violation with a pointed message rather than a bare `ReferenceError`.
  */
@@ -72,7 +80,6 @@ const FORBIDDEN = new Map<string, string>([
   ["XMLHttpRequest", "performing I/O"],
   ["WebSocket", "performing I/O"],
   ["require", "loading modules"],
-  ["import", "loading modules"],
   ["process", "reading host state"],
   ["globalThis", "reaching the host scope"],
   ["global", "reaching the host scope"],
@@ -87,6 +94,14 @@ const FORBIDDEN = new Map<string, string>([
   ["SharedArrayBuffer", "shared state"],
   ["crypto", "the RNG"],
 ]);
+
+/**
+ * The forbidden names with the reason each is refused. Exported so the DSL
+ * analyzer (§15.4) reports the engine's own reason. `import` is not listed:
+ * it is a keyword, so `import(…)` / `import.meta` never reach the proxy and
+ * the analyzer reports them under its own `dynamic-import` rule.
+ */
+export const FORBIDDEN_REASONS: ReadonlyMap<string, string> = FORBIDDEN;
 
 export type Scope = Record<string, unknown>;
 

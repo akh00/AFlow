@@ -1,0 +1,9 @@
+{
+  "definitions": {
+    "Local": { "$ref": "#/definitions/Nope" },
+    "ToMissingName": { "$ref": "./common.json#/$defs/NoSuchName" },
+    "BadEscape": { "$ref": "#/definitions/100%" },
+    "Slash": { "$ref": "#/definitions/a~1b" },
+    "a/b": { "type": "string" }
+  }
+}

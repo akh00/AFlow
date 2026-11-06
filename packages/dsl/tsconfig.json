@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["src/**/*.ts", "test/**/*.ts", "**/.aflow/types/*.d.ts"],
+  "exclude": ["test/fixtures/**"]
+}

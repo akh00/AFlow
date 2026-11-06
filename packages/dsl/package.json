@@ -1,0 +1,30 @@
+{
+  "name": "@aflow/dsl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AFlow typed TypeScript DSL (spec §15, artifact 2)",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./build": {
+      "types": "./src/build.ts",
+      "default": "./src/build.ts"
+    },
+    "./registry": {
+      "types": "./src/registry.ts",
+      "default": "./src/registry.ts"
+    }
+  },
+  "bin": {
+    "aflow": "./dist/cli.mjs"
+  },
+  "scripts": {
+    "build": "GOMAXPROCS=2 esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.mjs --external:typescript"
+  },
+  "dependencies": {
+    "typescript": "^5.7.2"
+  }
+}

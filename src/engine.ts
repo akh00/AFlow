@@ -529,11 +529,11 @@ export class Engine {
     produced.forEach((data, index) => {
       // `[E1]` item type may vary per child.
       const type =
-        typeof split.itemType === "string"
-          ? split.itemType
+        typeof split.item_type === "string"
+          ? split.item_type
           : String(
-              evalExpr(split.itemType, this.prospectiveScope(item, data, index), {
-                where: `${node.name}.split.itemType`,
+              evalExpr(split.item_type, this.prospectiveScope(item, data, index), {
+                where: `${node.name}.split.item_type`,
               }),
             );
       this.assertItemType(type, node);
@@ -564,7 +564,7 @@ export class Engine {
 
     return {
       status: "success",
-      result: { created, item_type: split.itemType, parallel: Boolean(split.parallel) },
+      result: { created, item_type: split.item_type, parallel: Boolean(split.parallel) },
     };
   }
 
@@ -1052,7 +1052,7 @@ export class Engine {
     };
   }
 
-  /** Scope for `[E1]` per-child `itemType`, before the child item exists. */
+  /** Scope for `[E1]` per-child `item_type`, before the child item exists. */
   private prospectiveScope(parent: ItemNode, data: unknown, index: number): Scope {
     const p = this.ctx.view(parent.id);
     return {
@@ -1190,6 +1190,11 @@ export function validateDefinition(def: WorkflowDefinition): void {
     }
     seen.add(node.name);
     bodyKindOf(node);
+    if (node.split && (node.split as { item_type?: unknown }).item_type === undefined) {
+      throw new WorkflowDefinitionError(
+        `node \`${node.name}\`: split is missing \`item_type\``,
+      );
+    }
 
     if (def.items && !(node.item in def.items)) {
       throw new WorkflowDefinitionError(

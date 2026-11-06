@@ -41,7 +41,7 @@ offline-retry resumption (§11) that today parks as `suspended` and never contin
 
 - An HTTP server implementing the OpenAPI document, and a scheduler that fires
   `resume()` at `next_retry_at` / input expiry. The host does this.
-- §10 validation. `receive.payloadType` is recorded and documented but **not enforced**
+- §10 validation. `receive.payload_type` is recorded and documented but **not enforced**
   until §10 validation lands — the spec text says so explicitly.
 - MCP OAuth, MCP sessions spanning several tasks, MCP client capabilities (sampling,
   roots, elicitation).
@@ -182,7 +182,7 @@ A seventh body kind. At most one body kind per node still holds, so §16 gains t
 ```jsonc
 { "name": "wait_approval", "item": "order",
   "receive": {
-    "payloadType": "ApprovalDecision",   // recorded; enforced once §10 validation lands
+    "payload_type": "ApprovalDecision",   // recorded; enforced once §10 validation lands
     "expires": "48h",                    // optional; §11 duration syntax
     "output": { "enrich": { "$do": "objects.approval = result" } }   // as call.output
   },
@@ -251,9 +251,9 @@ Without `async`, the host obtains the token from the suspension.
 `TaskRecord` gains optional `token` and `expires_at`.
 
 `POST /evaluations/{evaluationId}/inputs/{token}` — body: the payload (unconstrained
-JSON, `x-aflow-type` naming `receive.payloadType`). `200` completed in-request; `202` +
+JSON, `x-aflow-type` naming `receive.payload_type`). `200` completed in-request; `202` +
 `Location` suspended again or still running; `404` unknown evaluation or token; `409`
-already delivered, expired, or not awaiting; `422` payload fails `payloadType` (once §10
+already delivered, expired, or not awaiting; `422` payload fails `payload_type` (once §10
 validation exists). A workflow that *decides* failure after delivery is still `200` +
 `status: failed`, per the API convention.
 
